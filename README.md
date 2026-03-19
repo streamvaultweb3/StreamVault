@@ -83,8 +83,14 @@ Output is in `dist/`. The app uses `base: './'` and **HashRouter** so it works w
 ## Architecture notes
 
 - **Free uploads under 100KB** — Sample tier uses a single Arweave data transaction (signed with Wander).
-- **Larger files** — Full tier uploads the file as a data tx then creates an atomic asset with metadata pointing to the file; for production, consider **bundled uploads** (e.g. Turbo/ARX) for larger payloads.
-- **Atomic assets** — `libs.createAtomicAsset()` with `assetType: 'audio'`, metadata (e.g. `audioTxId`, `streamUrl`, `artwork`) for future DEX/royalty integration.
+- **Turbo uploads for full assets** — When **Turbo** is enabled in the publish modal, full tracks are uploaded via `@ardrive/turbo-sdk/web` using **Turbo Credits**, then wrapped as atomic assets. Payment tokens supported in the UI today: `arweave`, `ethereum`, `base-eth`, `solana`.
+- **Multi-wallet uploads** — Turbo is wired to work with multiple wallet types:
+  - Arweave: Wander / ArConnect (Turbo `signer` via `ArconnectSigner`)
+  - EVM (Ethereum + Base): browser wallets like MetaMask / Brave (Turbo `signer` via `InjectedEthereumSigner` over an `ethers` `BrowserProvider`)
+  - Solana: Phantom-style injected wallet (Turbo `walletAdapter` for `token: 'solana'`)
+- **Larger files** — Non-Turbo full tier uploads the file as a direct Arweave data tx (with size guard ~10MB) and then creates an atomic asset with metadata pointing to the file. Turbo removes this size constraint by using chunked uploads backed by Turbo Credits.
+- **Atomic assets** — `libs.createAtomicAsset()` with `assetType: 'audio'`, metadata (e.g. `audioTxId`, `streamUrl`, `artwork`, `royaltiesBps`) for future DEX/royalty integration.
+- **x402 & advanced Turbo features (roadmap)** — StreamVault’s use of `TurboFactory.authenticated()` and `uploadFile` is compatible with Turbo’s **x402 pay-per-upload**, **credit sharing**, and additional token rails (USDC on Base, ARIO, KYVE, etc). The current implementation focuses on the common flows (Turbo Credits + wallet payments); wiring in x402 funding modes and organizational credit sharing can be added with minimal changes in the `uploadWithTurbo` helper.
 - **Creator verification** — “Publish to Arweave” is shown only when the connected wallet matches the track’s artist (Audius user id compared with connected address where applicable).
 
 ## License

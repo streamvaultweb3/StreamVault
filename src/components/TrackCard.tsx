@@ -6,11 +6,14 @@ import styles from './TrackCard.module.css';
 interface TrackCardProps {
   track: Track;
   onPublishClick?: () => void;
+  /** If set, use this for the artist link (e.g. /profile/address for vault tracks). */
+  artistHref?: string;
 }
 
-export function TrackCard({ track, onPublishClick }: TrackCardProps) {
+export function TrackCard({ track, onPublishClick, artistHref }: TrackCardProps) {
   const { play, pause, currentTrack, isPlaying } = usePlayer();
   const isCurrent = currentTrack?.id === track.id;
+  const artistTo = artistHref ?? `/artist/${track.artistId}`;
 
   const handlePlay = () => {
     if (isCurrent && isPlaying) pause();
@@ -35,7 +38,7 @@ export function TrackCard({ track, onPublishClick }: TrackCardProps) {
       </button>
       <div className={styles.body}>
         <h3 className={styles.title}>{track.title}</h3>
-        <Link to={`/artist/${track.artistId}`} className={styles.artist}>
+        <Link to={artistTo} className={styles.artist}>
           {track.artist}
         </Link>
         <div className={styles.footer}>

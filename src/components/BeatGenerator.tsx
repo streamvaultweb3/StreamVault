@@ -7,6 +7,7 @@ import { useNavigate } from 'react-router-dom';
 import { useWallet } from '../context/WalletContext';
 import { usePermaweb } from '../context/PermawebContext';
 import { useGeneratedAudio } from '../context/GeneratedAudioContext';
+import { getSelectedOrLatestProfileByWallet } from '../lib/permaProfile';
 import styles from './BeatGenerator.module.css';
 
 type ClipSource = { id: string; title: string; url?: string; file?: File };
@@ -70,14 +71,13 @@ export function BeatGenerator() {
   const [resultBlob, setResultBlob] = useState<Blob | null>(null);
 
   useEffect(() => {
-    if (!address || !libs?.getProfileByWalletAddress) {
+    if (!address || !libs) {
       setClips([]);
       return;
     }
     let cancelled = false;
     setLoadingClips(true);
-    libs
-      .getProfileByWalletAddress(address)
+    getSelectedOrLatestProfileByWallet(libs, address)
       .then((profile: any) => {
         if (cancelled) return;
         const raw = profile?.samples || profile?.Samples || [];

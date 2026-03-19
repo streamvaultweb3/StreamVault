@@ -21,6 +21,7 @@ import styles from './Home.module.css';
 import { useWallet } from '../context/WalletContext';
 import { usePermaweb } from '../context/PermawebContext';
 import { CreateProfileModal } from '../components/CreateProfileModal';
+import { getSelectedOrLatestProfileByWallet } from '../lib/permaProfile';
 
 function mapAudiusToTrack(a: AudiusTrack): Track {
   return {
@@ -36,7 +37,7 @@ function mapAudiusToTrack(a: AudiusTrack): Track {
 
 export function Home() {
   const { address, walletType } = useWallet();
-  const { libs } = usePermaweb();
+  const { libs, isReady } = usePermaweb();
   const [tracks, setTracks] = useState<Track[]>([]);
   const [loading, setLoading] = useState(true);
   const [publishTrack, setPublishTrack] = useState<Track | null>(null);
@@ -51,6 +52,7 @@ export function Home() {
   const [createOpen, setCreateOpen] = useState(false);
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+  const [hasPermaProfile, setHasPermaProfile] = useState(false);
 
   const mapAudiusTrack = (a: AudiusTrack): Track => ({
     id: a.id,
@@ -145,20 +147,22 @@ export function Home() {
     audiusHandle?: string;
     thumbnail?: File | null;
     banner?: File | null;
+    thumbnailValue?: string | null;
+    bannerValue?: string | null;
+    removeThumbnail?: boolean;
+    removeBanner?: boolean;
   }) => {
     if (!libs?.createProfile || !address || walletType !== 'arweave') return;
     setCreating(true);
     setCreateError(null);
     try {
       console.info('[profile] create start', { address, audiusHandle: form.audiusHandle });
-      if (libs.getProfileByWalletAddress) {
-        const existing = await libs.getProfileByWalletAddress(address);
-        if (existing?.id) {
-          console.info('[profile] existing profile found', { profileId: existing.id });
-          setCreateError('Profile already exists for this wallet. Open your profile to view it.');
-          setCreateOpen(false);
-          return;
-        }
+      const existing = await getSelectedOrLatestProfileByWallet(libs, address);
+      if (existing?.id) {
+        console.info('[profile] existing profile found', { profileId: existing.id });
+        setCreateError('Profile already exists for this wallet. Open your profile to view it.');
+        setCreateOpen(false);
+        return;
       }
       const args: any = {
         username: form.username.trim(),
@@ -169,8 +173,12 @@ export function Home() {
       if (form.banner) args.banner = await fileToDataURL(form.banner);
       const profileId = await libs.createProfile(args);
       console.info('[profile] create success', { profileId });
-      if (profileId && libs.updateZone && form.audiusHandle) {
-        const update: Record<string, string> = {};
+      if (profileId && libs.updateZone) {
+        const update: Record<string, string> = {
+          Name: form.displayName.trim(),
+          Handle: form.username.trim(),
+          Bio: form.description.trim(),
+        };
         if (form.audiusHandle) update.AudiusHandle = form.audiusHandle;
         await libs.updateZone(update, profileId);
         console.info('[profile] profile updated', { profileId });
@@ -204,6 +212,25 @@ export function Home() {
     })();
     return () => { cancelled = true; };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!isReady || !libs || !address || walletType !== 'arweave') {
+        setHasPermaProfile(false);
+        return;
+      }
+      try {
+        const profile = await getSelectedOrLatestProfileByWallet(libs, address);
+        if (!cancelled) setHasPermaProfile(Boolean(profile?.id));
+      } catch {
+        if (!cancelled) setHasPermaProfile(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isReady, libs, address, walletType]);
 
   return (
     <div className={styles.page}>
@@ -253,28 +280,30 @@ export function Home() {
           </div>
         )}
 
-        <div className={styles.audiusCta}>
-          <div>
-            <p className={styles.ctaTitle}>Bridge to permaweb</p>
-            <p className={styles.ctaCopy}>
-              Create an Arweave profile to store your sound bites on-chain and link them to your Audius identity.
-            </p>
-            {walletType && walletType !== 'arweave' && (
-              <p className={styles.ctaNote}>
-                Arweave profile creation requires Wander. Other wallets can still publish via Turbo.
+        {!hasPermaProfile && (
+          <div className={styles.audiusCta}>
+            <div>
+              <p className={styles.ctaTitle}>Bridge to permaweb</p>
+              <p className={styles.ctaCopy}>
+                Create an Arweave profile to store your sound bites on-chain and link them to your Audius identity.
               </p>
-            )}
+              {walletType && walletType !== 'arweave' && (
+                <p className={styles.ctaNote}>
+                  Arweave profile creation requires Wander. Other wallets can still publish via Turbo.
+                </p>
+              )}
+            </div>
+            <button
+              type="button"
+              className={styles.ctaBtn}
+              onClick={() => setCreateOpen(true)}
+              disabled={walletType !== 'arweave'}
+              title={walletType !== 'arweave' ? 'Connect Wander (Arweave) to create a profile' : undefined}
+            >
+              {walletType !== 'arweave' ? 'Connect Wander' : 'Create Arweave profile'}
+            </button>
           </div>
-          <button
-            type="button"
-            className={styles.ctaBtn}
-            onClick={() => setCreateOpen(true)}
-            disabled={walletType !== 'arweave'}
-            title={walletType !== 'arweave' ? 'Connect Wander (Arweave) to create a profile' : undefined}
-          >
-            {walletType !== 'arweave' ? 'Connect Wander' : 'Create Arweave profile'}
-          </button>
-        </div>
+        )}
 
         {createError && <p className={styles.errorText}>{createError}</p>}
 

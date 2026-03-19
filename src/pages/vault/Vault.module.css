@@ -1,0 +1,132 @@
+.sectionTitle {
+  font-size: var(--text-xl);
+  font-weight: var(--font-semibold);
+  color: var(--text-primary);
+  margin-bottom: 8px;
+}
+
+.sectionSubtitle {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  margin-bottom: 24px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 24px;
+}
+
+.loading {
+  font-size: var(--text-base);
+  color: var(--text-muted);
+  padding: 48px 0;
+  text-align: center;
+}
+
+.errorText {
+  font-size: var(--text-sm);
+  color: var(--error);
+  margin-bottom: 12px;
+}
+
+.searchRow {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 24px;
+}
+
+.searchInput {
+  min-width: 260px;
+  padding: 10px 12px;
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--bg-glass-border);
+  border-radius: var(--radius-md);
+  outline: none;
+}
+
+.searchBtn {
+  padding: 10px 16px;
+  font-size: var(--text-sm);
+  font-weight: var(--font-semibold);
+  color: #fff;
+  background: var(--accent);
+  border-radius: var(--radius-md);
+  transition: opacity 0.15s;
+}
+
+.searchBtn:hover:not(:disabled) {
+  opacity: 0.92;
+}
+
+.searchBtn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.placeholderBox {
+  padding: 48px 24px;
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: var(--text-base);
+  border: 1px dashed var(--bg-glass-border);
+  border-radius: var(--radius-lg);
+}
+
+.tabRow {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.tab {
+  padding: 8px 16px;
+  font-size: var(--text-sm);
+  font-weight: var(--font-medium);
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--bg-glass-border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
+
+.tabActive {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.walletCard {
+  padding: 20px;
+  border-radius: var(--radius-lg);
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--bg-glass-border);
+  max-width: 400px;
+  margin-bottom: 16px;
+}
+
+.balanceRow {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--bg-glass-border);
+}
+
+.balanceRow:last-child {
+  border-bottom: none;
+}
+
+.rewardsKey {
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  word-break: break-all;
+}
+
+.rewardsAmount {
+  font-size: var(--text-sm);
+  font-weight: var(--font-semibold);
+  color: var(--text-primary);
+}

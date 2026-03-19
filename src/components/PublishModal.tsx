@@ -8,7 +8,9 @@ import {
   PublishTier,
   type PublishResult,
 } from '../lib/arweave';
+import { getSelectedOrLatestProfileByWallet } from '../lib/permaProfile';
 import { publishSampleToArweave, publishFullAsAtomicAsset, createFiatTopUpSession } from '../lib/publish';
+import type { UdlConfig, RoyaltySplit, UdlAiUse } from '../lib/udl';
 import styles from './PublishModal.module.css';
 
 interface PublishModalProps {
@@ -39,6 +41,12 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
   const [fiatAmount, setFiatAmount] = useState<string>('10');
   const [isTopUpLoading, setIsTopUpLoading] = useState(false);
   const [showWalletChooser, setShowWalletChooser] = useState(false);
+
+  // Simple UDL controls
+  const [licenseUsePreset, setLicenseUsePreset] = useState<'stream' | 'stream-download' | 'stream-download-commercial'>('stream');
+  const [aiUse, setAiUse] = useState<UdlAiUse>('deny');
+  const [licenseFee, setLicenseFee] = useState<string>('0');
+  const [licenseCurrency, setLicenseCurrency] = useState<string>('MATIC');
 
   // New states for global upload where track is undefined
   const [customTitle, setCustomTitle] = useState(track?.title || '');
@@ -91,7 +99,66 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
     return new Blob([data.slice(0, maxBytes)], { type: contentType });
   };
 
+  const buildUdlConfig = (): UdlConfig => {
+    const usage =
+      licenseUsePreset === 'stream'
+        ? ['stream']
+        : licenseUsePreset === 'stream-download'
+          ? ['stream', 'download']
+          : ['stream', 'download', 'commercial-sync'];
+
+    const fee = licenseFee.trim() || '0';
+
+    return {
+      licenseId: 'udl://music/1.0',
+      uri: (import.meta as any).env?.VITE_UDL_LICENSE_URI || undefined,
+      usage,
+      aiUse,
+      fee,
+      currency: licenseCurrency || 'MATIC',
+      interval: 'per-stream',
+      attribution: 'required',
+    };
+  };
+
+  const buildDefaultSplits = (): RoyaltySplit[] => {
+    if (!address) return [];
+    let chain: RoyaltySplit['chain'] = 'arweave';
+    let token = 'AR';
+
+    if (useTurbo) {
+      if (turboToken === 'base-eth' || turboToken === 'base-usdc' || turboToken === 'base-ario') {
+        chain = 'base';
+        token = turboToken === 'base-eth' ? 'ETH' : turboToken === 'base-usdc' ? 'USDC' : 'ARIO';
+      } else if (turboToken === 'polygon-usdc' || turboToken === 'pol') {
+        chain = 'polygon';
+        token = turboToken === 'polygon-usdc' ? 'USDC' : 'POL';
+      } else if (turboToken === 'solana') {
+        chain = 'solana';
+        token = 'SOL';
+      }
+    } else if (walletType === 'ethereum') {
+      chain = 'ethereum';
+      token = 'ETH';
+    } else if (walletType === 'solana') {
+      chain = 'solana';
+      token = 'SOL';
+    }
+
+    return [
+      {
+        address,
+        shareBps: 10_000,
+        chain,
+        token,
+      },
+    ];
+  };
+
   const handlePublish = async () => {
+    // #region agent log
+    fetch('http://127.0.0.1:7939/ingest/0b5e774a-21c9-48b0-b426-076405dcd7ec',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'935ac8'},body:JSON.stringify({sessionId:'935ac8',runId:'pre-fix',hypothesisId:'P1',location:'src/components/PublishModal.tsx:157',message:'handlePublish-start',data:{tier,walletType,hasAddress:Boolean(address),useTurbo,isAutoSample,hasSampleFile:Boolean(sampleFile),hasFullFile:Boolean(fullFile),audioFromGenerator:Boolean(generatedAudio)},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion agent log
     if (!address || !walletType || !libs) {
       // Show inline wallet chooser instead of a plain error
       setShowWalletChooser(true);
@@ -162,6 +229,9 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
           setErrorMessage('Full asset must be under ~10MB unless using Turbo.');
           return;
         }
+        const udlConfig = buildUdlConfig();
+        const splits = buildDefaultSplits();
+
         res = await publishFullAsAtomicAsset(
           {
             audio: effectiveAudio,
@@ -171,6 +241,8 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
             artworkUrl: (coverFile || generatedCover) ? undefined : track?.artwork,
             artworkFile: (coverFile || generatedCover) || undefined,
             royaltiesBps: Number.isFinite(royaltiesBps) ? royaltiesBps : undefined,
+            udl: udlConfig,
+            splits,
             useTurbo,
             turboPaymentToken: turboToken,
           },
@@ -188,8 +260,8 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
       console.info('[publish] Result', res);
       if (res.success && res.txId && address) {
         try {
-          if (walletType === 'arweave' && libs?.getProfileByWalletAddress && libs?.addToZone) {
-            const profile = await libs.getProfileByWalletAddress(address);
+          if (walletType === 'arweave' && libs?.addToZone) {
+            const profile = await getSelectedOrLatestProfileByWallet(libs, address);
             if (profile?.id) {
               await libs.addToZone(
                 {
@@ -395,6 +467,62 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
                   onChange={(e) => setRoyaltiesBps(Number(e.target.value))}
                 />
               </label>
+              <div className={styles.licenseBlock}>
+                <p className={styles.licenseTitle}>License & usage (UDL)</p>
+                <label className={styles.label}>
+                  Usage
+                  <select
+                    className={styles.select}
+                    value={licenseUsePreset}
+                    onChange={(e) => setLicenseUsePreset(e.target.value as typeof licenseUsePreset)}
+                  >
+                    <option value="stream">Streaming only</option>
+                    <option value="stream-download">Stream + personal download</option>
+                    <option value="stream-download-commercial">Stream + download + commercial sync</option>
+                  </select>
+                </label>
+                <label className={styles.label}>
+                  AI use
+                  <select
+                    className={styles.select}
+                    value={aiUse}
+                    onChange={(e) => setAiUse(e.target.value as UdlAiUse)}
+                  >
+                    <option value="deny">No AI training or generation</option>
+                    <option value="allow-train">Allow AI training only</option>
+                    <option value="allow-generate">Allow training + generation</option>
+                  </select>
+                </label>
+                <div className={styles.licenseRow}>
+                  <label className={styles.label} style={{ flex: 1 }}>
+                    License fee
+                    <input
+                      className={styles.input}
+                      type="number"
+                      min={0}
+                      step={0.01}
+                      value={licenseFee}
+                      onChange={(e) => setLicenseFee(e.target.value)}
+                    />
+                  </label>
+                  <label className={styles.label} style={{ flex: 1 }}>
+                    Currency
+                    <select
+                      className={styles.select}
+                      value={licenseCurrency}
+                      onChange={(e) => setLicenseCurrency(e.target.value)}
+                    >
+                      <option value="U">$U (AO)</option>
+                      <option value="MATIC">MATIC (Polygon)</option>
+                      <option value="USDC.base">USDC (Base)</option>
+                      <option value="AR">AR (Arweave)</option>
+                    </select>
+                  </label>
+                </div>
+                <p className={styles.hint}>
+                  These values are stored on-chain in the Universal Data License (UDL) fields for this track.
+                </p>
+              </div>
               <label className={styles.checkLabel}>
                 <input
                   type="checkbox"
