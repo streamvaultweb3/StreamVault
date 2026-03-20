@@ -73,6 +73,9 @@ body {
 
 #root {
   min-height: 100vh;
+}
+
+#root.has-player {
   padding-bottom: var(--player-height);
 }
 

@@ -14,6 +14,7 @@ import { VaultLibrary } from './pages/vault/VaultLibrary';
 import { VaultWallet } from './pages/vault/VaultWallet';
 import { VaultRewards } from './pages/vault/VaultRewards';
 import { VaultPlaceholder } from './pages/vault/VaultPlaceholder';
+import { usePlayer } from './context/PlayerContext';
 
 const GA_MEASUREMENT_ID = 'G-HBLXEBQB7H';
 
@@ -50,6 +51,17 @@ function RouteAnalytics() {
 }
 
 export default function App() {
+  const { currentTrack } = usePlayer();
+
+  useEffect(() => {
+    const root = document.getElementById('root');
+    if (!root) return;
+    root.classList.toggle('has-player', Boolean(currentTrack));
+    return () => {
+      root.classList.remove('has-player');
+    };
+  }, [currentTrack]);
+
   return (
     <Layout>
       <RouteAnalytics />
