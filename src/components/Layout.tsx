@@ -66,6 +66,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
   const { libs, isReady } = usePermaweb();
   const { audiusUser, login, logout, apiKeyConfigured, isLoggingIn, authError } = useAudiusAuth();
   const [showWalletMenu, setShowWalletMenu] = React.useState(false);
+  const [mobileNavOpen, setMobileNavOpen] = React.useState(false);
   const [isPublishOpen, setIsPublishOpen] = React.useState(false);
   const [profileLoading, setProfileLoading] = React.useState(false);
   const [profile, setProfile] = React.useState<any | null>(null);
@@ -170,6 +171,10 @@ export function Layout({ children }: { children: React.ReactNode }) {
       clearAddressPolling();
     };
   }, [clearAddressPolling]);
+
+  React.useEffect(() => {
+    setMobileNavOpen(false);
+  }, [address]);
 
   React.useEffect(() => {
     if (!isReady || !libs || !address) {
@@ -390,10 +395,178 @@ export function Layout({ children }: { children: React.ReactNode }) {
     }
   }, [beginAddressPolling]);
 
+  const walletMenuContent = address ? (
+    <>
+      <span className={styles.walletMenuType}>{walletType}</span>
+      {profileLoading && <span className={styles.walletMenuType}>Loading profile…</span>}
+      {connectError && <span className={styles.walletMenuError}>{connectError}</span>}
+      {normalizedProfile?.id && (
+        <div className={styles.walletMenuSection}>
+          <span className={styles.walletMenuType}>
+            {normalizedProfile.displayName || normalizedProfile.username || 'Permaweb profile'}
+          </span>
+          <span className={styles.walletMenuType}>{String(normalizedProfile.id).slice(0, 14)}…</span>
+        </div>
+      )}
+      <Link
+        to={profileHref}
+        className={styles.walletMenuAction}
+        onClick={() => setShowWalletMenu(false)}
+      >
+        Open profile
+      </Link>
+      <button
+        type="button"
+        className={styles.walletMenuAction}
+        onClick={() => copyText(address, 'wallet')}
+      >
+        {copiedKey === 'wallet' ? 'Copied wallet' : 'Copy wallet address'}
+      </button>
+      {normalizedProfile?.id && (
+        <button
+          type="button"
+          className={styles.walletMenuAction}
+          onClick={() => copyText(String(normalizedProfile.id), 'profile')}
+        >
+          {copiedKey === 'profile' ? 'Copied profile id' : 'Copy profile id'}
+        </button>
+      )}
+      {aoTokens.length > 0 && (
+        <div className={styles.walletMenuSection}>
+          <span className={styles.walletMenuType}>AO tokens</span>
+          {aoTokens.slice(0, 4).map((token) => (
+            <button
+              key={token.id}
+              type="button"
+              className={styles.walletMenuAction}
+              onClick={() => copyText(token.id, `token:${token.id}`)}
+              title={`kind=${token.kind} source=${token.debug.infoSource}${token.debug.assetType ? ` assetType=${token.debug.assetType}` : ''}`}
+            >
+              {token.ticker || token.name} · {token.displayBalance}
+            </button>
+          ))}
+        </div>
+      )}
+      {atomicAssets.length > 0 && (
+        <div className={styles.walletMenuSection}>
+          <span className={styles.walletMenuType}>Digital assets</span>
+          {atomicAssets.slice(0, 4).map((asset) => (
+            <button
+              key={asset.id}
+              type="button"
+              className={styles.walletMenuAction}
+              onClick={() => copyText(asset.id, `asset:${asset.id}`)}
+              title={`kind=${asset.kind} source=${asset.debug.infoSource}${asset.debug.assetType ? ` assetType=${asset.debug.assetType}` : ''}`}
+            >
+              {asset.name}
+            </button>
+          ))}
+        </div>
+      )}
+      <div className={styles.walletMenuSection}>
+        <span className={styles.walletMenuType}>Audius</span>
+        {!apiKeyConfigured ? (
+          <span className={styles.walletMenuType}>Missing API key</span>
+        ) : audiusUser ? (
+          <>
+            <span className={styles.walletMenuType}>@{audiusUser.handle}</span>
+            <button
+              type="button"
+              className={styles.walletMenuAction}
+              onClick={() => logout()}
+            >
+              Disconnect Audius
+            </button>
+          </>
+        ) : (
+          <>
+            <button
+              type="button"
+              className={styles.walletMenuAction}
+              onClick={openAudiusLogin}
+            >
+              Open Audius first
+            </button>
+            <button
+              type="button"
+              className={styles.walletMenuAction}
+              disabled={isLoggingIn}
+              onClick={() => login()}
+            >
+              {isLoggingIn ? 'Connecting Audius…' : 'Connect Audius'}
+            </button>
+            <span className={styles.walletMenuType}>
+              Use email/social in Audius first if prompted for wallet verification.
+            </span>
+          </>
+        )}
+        {authError && <span className={styles.walletMenuError}>{authError}</span>}
+      </div>
+      <button
+        type="button"
+        className={styles.walletMenuAction}
+        onClick={() => {
+          disconnect();
+          setShowWalletMenu(false);
+        }}
+      >
+        Disconnect
+      </button>
+    </>
+  ) : (
+    <>
+      {connectError && <span className={styles.walletMenuError}>{connectError}</span>}
+      {connectStage !== 'idle' && (
+        <span className={styles.walletMenuStatus}>{connectStageText(connectStage)}</span>
+      )}
+      <div onClickCapture={() => trackEvent('wallet_connect_attempt', { wallet_type: 'arweave_wallet_kit', source: 'wallet_menu' })}>
+        <ConnectButton
+          className={styles.walletMenuAction}
+          style={{
+            width: '100%',
+            textAlign: 'left',
+            background: 'transparent',
+            border: 'none',
+          }}
+          showBalance={false}
+          showProfilePicture={false}
+          profileModal={false}
+        >
+          Arweave (Wallet Kit)
+        </ConnectButton>
+      </div>
+      <button
+        type="button"
+        className={styles.walletMenuAction}
+        onClick={handleUseWanderConnect}
+        disabled={startingWanderConnect || isConnecting}
+      >
+        {startingWanderConnect ? 'Working…' : 'Use Wander Connect (email/social)'}
+      </button>
+      <button type="button" className={styles.walletMenuAction} onClick={() => handleConnect('ethereum')}>
+        Ethereum
+      </button>
+      <button type="button" className={styles.walletMenuAction} onClick={() => handleConnect('solana')}>
+        Solana
+      </button>
+    </>
+  );
+
   return (
     <div className={styles.layout}>
       <header className={styles.header}>
         <div className={styles.headerInner}>
+          <button
+            type="button"
+            className={styles.mobileMenuToggle}
+            aria-label={mobileNavOpen ? 'Close navigation menu' : 'Open navigation menu'}
+            aria-expanded={mobileNavOpen}
+            onClick={() => setMobileNavOpen((open) => !open)}
+          >
+            <span className={styles.mobileMenuBar} />
+            <span className={styles.mobileMenuBar} />
+            <span className={styles.mobileMenuBar} />
+          </button>
           <Link to="/" className={styles.logo}>
             <img
               src="/streamvault-logo.png"
@@ -405,35 +578,92 @@ export function Layout({ children }: { children: React.ReactNode }) {
               <span className={styles.tagline}>Stream anywhere. Preserve forever.</span>
             </div>
           </Link>
-          <nav className={styles.nav}>
-            <Link to="/" className={styles.navLink}>Discover</Link>
-            <Link to="/vault" className={styles.navLink}>Vault</Link>
-            <Link to="/creator-tools" className={styles.navLink}>Creator tools</Link>
+          <nav className={`${styles.nav} ${mobileNavOpen ? styles.navOpen : ''}`}>
+            <div className={styles.mobileAccount}>
+              {address ? (
+                <>
+                  <div className={styles.mobileAccountIdentity}>
+                    {profileAvatar ? (
+                      <img src={profileAvatar} alt="" className={styles.mobileAccountAvatar} />
+                    ) : (
+                      <span className={styles.mobileAccountAvatarFallback} aria-hidden>
+                        {address.slice(0, 1).toUpperCase()}
+                      </span>
+                    )}
+                    <div className={styles.mobileAccountMeta}>
+                      <span className={styles.mobileAccountTitle}>
+                        {normalizedProfile?.displayName || normalizedProfile?.username || 'Profile'}
+                      </span>
+                      <span className={styles.mobileAccountSub}>
+                        {address.slice(0, 6)}…{address.slice(-4)}
+                      </span>
+                    </div>
+                  </div>
+                  <div className={styles.mobileAccountActions}>
+                    <button
+                      type="button"
+                      className={`${styles.navLink} ${styles.navActionInline}`}
+                      onClick={() => setShowWalletMenu((open) => !open)}
+                    >
+                      Account
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  className={`${styles.navLink} ${styles.navActionInline}`}
+                  onClick={() => setShowWalletMenu((open) => !open)}
+                >
+                  Connect wallet
+                </button>
+              )}
+              {showWalletMenu && (
+                <div className={`${styles.walletMenu} ${styles.mobileWalletMenu} glass-strong`}>
+                  {walletMenuContent}
+                </div>
+              )}
+            </div>
+            <Link to="/" className={styles.navLink} onClick={() => setMobileNavOpen(false)}>Discover</Link>
+            <Link to="/vault" className={styles.navLink} onClick={() => setMobileNavOpen(false)}>Vault</Link>
+            <Link to="/creator-tools" className={styles.navLink} onClick={() => setMobileNavOpen(false)}>Creator tools</Link>
             {address && (
-              <Link to={profileHref} className={styles.navLink}>Profile</Link>
+              <Link to={profileHref} className={styles.navLink} onClick={() => setMobileNavOpen(false)}>Profile</Link>
             )}
             <button
               type="button"
-              className={styles.walletBtn}
+              className={`${styles.navLink} ${styles.navAction}`}
+              onClick={() => {
+                setMobileNavOpen(false);
+                setIsPublishOpen(true);
+              }}
+            >
+              Upload
+            </button>
+          </nav>
+          <div className={styles.headerActions}>
+            <button
+              type="button"
+              className={`${styles.walletBtn} ${styles.headerUploadBtn}`}
               onClick={() => setIsPublishOpen(true)}
               style={{ padding: '0 12px', background: 'var(--accent-color)' }}
             >
               Upload
             </button>
             <div className={styles.walletWrap}>
-            <button
-              type="button"
-              className={styles.walletBtn}
-              onClick={() => {
-                const next = !showWalletMenu;
-                setShowWalletMenu(next);
-                trackEvent('wallet_menu_toggle', {
-                  open: next,
-                  has_connected_wallet: Boolean(address),
-                });
-              }}
-              disabled={isConnecting}
-            >
+              <button
+                type="button"
+                className={`${styles.walletBtn} ${address ? styles.walletAvatarBtn : ''}`}
+                onClick={() => {
+                  const next = !showWalletMenu;
+                  setShowWalletMenu(next);
+                  trackEvent('wallet_menu_toggle', {
+                    open: next,
+                    has_connected_wallet: Boolean(address),
+                  });
+                }}
+                disabled={isConnecting}
+              >
                 {isConnecting
                   ? 'Connecting…'
                   : address ? (
@@ -452,163 +682,11 @@ export function Layout({ children }: { children: React.ReactNode }) {
               </button>
               {showWalletMenu && (
                 <div className={styles.walletMenu + ' glass-strong'}>
-                  {address ? (
-                    <>
-                      <span className={styles.walletMenuType}>{walletType}</span>
-                      {profileLoading && <span className={styles.walletMenuType}>Loading profile…</span>}
-                      {connectError && <span className={styles.walletMenuError}>{connectError}</span>}
-                      {normalizedProfile?.id && (
-                        <div className={styles.walletMenuSection}>
-                          <span className={styles.walletMenuType}>
-                            {normalizedProfile.displayName || normalizedProfile.username || 'Permaweb profile'}
-                          </span>
-                          <span className={styles.walletMenuType}>{String(normalizedProfile.id).slice(0, 14)}…</span>
-                        </div>
-                      )}
-                      <Link
-                        to={profileHref}
-                        className={styles.walletMenuAction}
-                        onClick={() => setShowWalletMenu(false)}
-                      >
-                        Open profile
-                      </Link>
-                      <button
-                        type="button"
-                        className={styles.walletMenuAction}
-                        onClick={() => copyText(address, 'wallet')}
-                      >
-                        {copiedKey === 'wallet' ? 'Copied wallet' : 'Copy wallet address'}
-                      </button>
-                      {normalizedProfile?.id && (
-                        <button
-                          type="button"
-                          className={styles.walletMenuAction}
-                          onClick={() => copyText(String(normalizedProfile.id), 'profile')}
-                        >
-                          {copiedKey === 'profile' ? 'Copied profile id' : 'Copy profile id'}
-                        </button>
-                      )}
-                      {aoTokens.length > 0 && (
-                        <div className={styles.walletMenuSection}>
-                          <span className={styles.walletMenuType}>AO tokens</span>
-                          {aoTokens.slice(0, 4).map((token) => (
-                            <button
-                              key={token.id}
-                              type="button"
-                              className={styles.walletMenuAction}
-                              onClick={() => copyText(token.id, `token:${token.id}`)}
-                              title={`kind=${token.kind} source=${token.debug.infoSource}${token.debug.assetType ? ` assetType=${token.debug.assetType}` : ''}`}
-                            >
-                              {token.ticker || token.name} · {token.displayBalance}
-                            </button>
-                          ))}
-                        </div>
-                      )}
-                      {atomicAssets.length > 0 && (
-                        <div className={styles.walletMenuSection}>
-                          <span className={styles.walletMenuType}>Digital assets</span>
-                          {atomicAssets.slice(0, 4).map((asset) => (
-                            <button
-                              key={asset.id}
-                              type="button"
-                              className={styles.walletMenuAction}
-                              onClick={() => copyText(asset.id, `asset:${asset.id}`)}
-                              title={`kind=${asset.kind} source=${asset.debug.infoSource}${asset.debug.assetType ? ` assetType=${asset.debug.assetType}` : ''}`}
-                            >
-                              {asset.name}
-                            </button>
-                          ))}
-                        </div>
-                      )}
-                      <div className={styles.walletMenuSection}>
-                        <span className={styles.walletMenuType}>Audius</span>
-                        {!apiKeyConfigured ? (
-                          <span className={styles.walletMenuType}>Missing API key</span>
-                        ) : audiusUser ? (
-                          <>
-                            <span className={styles.walletMenuType}>@{audiusUser.handle}</span>
-                            <button
-                              type="button"
-                              className={styles.walletMenuAction}
-                              onClick={() => logout()}
-                            >
-                              Disconnect Audius
-                            </button>
-                          </>
-                        ) : (
-                          <>
-                            <button
-                              type="button"
-                              className={styles.walletMenuAction}
-                              onClick={openAudiusLogin}
-                            >
-                              Open Audius first
-                            </button>
-                            <button
-                              type="button"
-                              className={styles.walletMenuAction}
-                              disabled={isLoggingIn}
-                              onClick={() => login()}
-                            >
-                              {isLoggingIn
-                                ? 'Connecting Audius…'
-                                : 'Connect Audius'}
-                            </button>
-                            <span className={styles.walletMenuType}>
-                              Use email/social in Audius first if prompted for wallet verification.
-                            </span>
-                          </>
-                        )}
-                        {authError && (
-                          <span className={styles.walletMenuError}>{authError}</span>
-                        )}
-                      </div>
-                      <button type="button" className={styles.walletMenuAction} onClick={() => { disconnect(); setShowWalletMenu(false); }}>
-                        Disconnect
-                      </button>
-                    </>
-                  ) : (
-                    <>
-                      {connectError && <span className={styles.walletMenuError}>{connectError}</span>}
-                      {connectStage !== 'idle' && (
-                        <span className={styles.walletMenuStatus}>{connectStageText(connectStage)}</span>
-                      )}
-                      <div onClickCapture={() => trackEvent('wallet_connect_attempt', { wallet_type: 'arweave_wallet_kit', source: 'wallet_menu' })}>
-                        <ConnectButton
-                          className={styles.walletMenuAction}
-                          style={{
-                            width: '100%',
-                            textAlign: 'left',
-                            background: 'transparent',
-                            border: 'none',
-                          }}
-                          showBalance={false}
-                          showProfilePicture={false}
-                          profileModal={false}
-                        >
-                          Arweave (Wallet Kit)
-                        </ConnectButton>
-                      </div>
-                      <button
-                        type="button"
-                        className={styles.walletMenuAction}
-                        onClick={handleUseWanderConnect}
-                        disabled={startingWanderConnect || isConnecting}
-                      >
-                        {startingWanderConnect ? 'Working…' : 'Use Wander Connect (email/social)'}
-                      </button>
-                      <button type="button" className={styles.walletMenuAction} onClick={() => handleConnect('ethereum')}>
-                        Ethereum
-                      </button>
-                      <button type="button" className={styles.walletMenuAction} onClick={() => handleConnect('solana')}>
-                        Solana
-                      </button>
-                    </>
-                  )}
+                  {walletMenuContent}
                 </div>
               )}
             </div>
-          </nav>
+          </div>
         </div>
       </header>
       <main className={styles.main}>{children}</main>

@@ -23,6 +23,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  position: relative;
 }
 
 .logo {
@@ -62,11 +63,53 @@
   gap: 24px;
 }
 
+.headerActions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+  position: relative;
+  z-index: 2;
+}
+
+.mobileMenuToggle {
+  display: none;
+  width: 42px;
+  height: 42px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 4px;
+  border-radius: 12px;
+  border: 1px solid var(--bg-glass-border);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.mobileMenuBar {
+  width: 18px;
+  height: 2px;
+  border-radius: 999px;
+  background: var(--text-primary);
+}
+
 .navLink {
   font-size: var(--text-sm);
   font-weight: var(--font-medium);
   color: var(--text-secondary);
   transition: color 0.15s;
+}
+
+.navAction {
+  display: none;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+.navActionInline {
+  display: block;
 }
 
 .navLink:hover {
@@ -75,6 +118,7 @@
 
 .walletWrap {
   position: relative;
+  z-index: 2;
 }
 
 .walletBtn {
@@ -86,6 +130,15 @@
   border: 1px solid var(--bg-glass-border);
   border-radius: var(--radius-md);
   transition: background 0.15s, border-color 0.15s;
+}
+
+.walletAvatarBtn {
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  border-radius: 50%;
+  background: transparent;
+  border: none;
 }
 
 .walletBtnContent {
@@ -102,17 +155,17 @@
 }
 
 .walletAvatar {
-  width: 34px;
-  height: 34px;
+  width: 38px;
+  height: 38px;
   border-radius: 50%;
   object-fit: cover;
-  border: 1px solid var(--bg-glass-border);
+  border: 1px solid rgba(255, 255, 255, 0.14);
   flex-shrink: 0;
 }
 
 .walletAvatarFallback {
-  width: 34px;
-  height: 34px;
+  width: 38px;
+  height: 38px;
   border-radius: 50%;
   display: inline-flex;
   align-items: center;
@@ -127,6 +180,12 @@
 .walletBtn:hover:not(:disabled) {
   background: var(--bg-hover);
   border-color: var(--text-muted);
+}
+
+.walletAvatarBtn:hover:not(:disabled) {
+  background: transparent;
+  border-color: transparent;
+  opacity: 0.92;
 }
 
 .walletBtn:disabled {
@@ -205,10 +264,248 @@
   background: var(--bg-hover);
 }
 
+.mobileAccount {
+  display: none;
+}
+
 .main {
   flex: 1;
   max-width: var(--content-max);
   width: 100%;
   margin: 0 auto;
   padding: 32px 24px;
+}
+
+@media (max-width: 814px) {
+  .headerInner {
+    display: grid;
+    grid-template-columns: 42px 1fr auto;
+    gap: 12px;
+  }
+
+  .mobileMenuToggle {
+    display: inline-flex;
+  }
+
+  .logo {
+    position: absolute;
+    left: 50%;
+    transform: translateX(-50%);
+    gap: 6px;
+    z-index: 1;
+    max-width: calc(100% - 128px);
+  }
+
+  .logoMark {
+    width: 52px;
+    height: 52px;
+  }
+
+  .logoTextGroup {
+    gap: 0;
+    align-items: center;
+  }
+
+  .tagline {
+    display: none;
+  }
+
+  .nav {
+    position: absolute;
+    top: calc(100% + 10px);
+    left: 16px;
+    right: 16px;
+    display: none;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+    padding: 14px;
+    border-radius: 20px;
+    background: rgba(14, 14, 17, 0.96);
+    border: 1px solid var(--bg-glass-border);
+    box-shadow: 0 24px 54px rgba(0, 0, 0, 0.38);
+  }
+
+  .navOpen {
+    display: flex;
+  }
+
+  .navLink {
+    display: block;
+    padding: 10px 12px;
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.03);
+  }
+
+  .navAction {
+    display: block;
+  }
+
+  .mobileAccount {
+    display: grid;
+    gap: 10px;
+    margin-bottom: 4px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--bg-glass-border);
+  }
+
+  .mobileAccountIdentity {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .mobileAccountAvatar,
+  .mobileAccountAvatarFallback {
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .mobileAccountAvatar {
+    object-fit: cover;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+  }
+
+  .mobileAccountAvatarFallback {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(135deg, rgba(127, 92, 255, 0.9), rgba(69, 192, 255, 0.8));
+    color: white;
+    font-size: var(--text-sm);
+    font-weight: var(--font-semibold);
+  }
+
+  .mobileAccountMeta {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .mobileAccountTitle {
+    font-size: var(--text-sm);
+    font-weight: var(--font-semibold);
+    color: var(--text-primary);
+  }
+
+  .mobileAccountSub {
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+  }
+
+  .mobileAccountActions {
+    display: grid;
+    gap: 6px;
+  }
+
+  .mobileWalletMenu {
+    position: static;
+    min-width: 0;
+    max-width: none;
+    margin-top: 4px;
+    box-shadow: none;
+  }
+
+  .headerActions {
+    justify-self: end;
+    gap: 8px;
+  }
+
+  .headerUploadBtn {
+    display: none;
+  }
+
+  .walletBtn {
+    padding: 10px 12px;
+  }
+}
+
+@media (max-width: 680px) {
+  .headerInner {
+    padding: 0 16px;
+    grid-template-columns: 42px 1fr 52px;
+  }
+
+  .logoText {
+    font-size: var(--text-base);
+  }
+
+  .logoMark {
+    width: 40px;
+    height: 40px;
+  }
+
+  .logo {
+    position: static;
+    left: auto;
+    transform: none;
+    justify-self: center;
+    max-width: 100%;
+  }
+
+  .headerActions {
+    position: static;
+    right: auto;
+    top: auto;
+    transform: none;
+    justify-self: end;
+    width: 52px;
+    justify-content: flex-end;
+  }
+
+  .walletWrap {
+    display: none;
+  }
+
+  .walletBtn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 52px;
+    min-height: 52px;
+    padding: 8px 10px;
+    overflow: hidden;
+  }
+
+  .walletAvatarBtn {
+    min-width: 38px;
+    min-height: 38px;
+    width: 38px;
+    height: 38px;
+    padding: 0;
+  }
+
+  .headerActions .walletBtn:first-child {
+    display: none;
+  }
+}
+
+@media (max-width: 520px) {
+  .logoMark {
+    display: block;
+    width: 28px;
+    height: 28px;
+  }
+
+  .logo {
+    max-width: 100%;
+    gap: 5px;
+  }
+
+  .logoText {
+    font-size: 0.92rem;
+    letter-spacing: -0.03em;
+  }
+}
+
+@media (max-width: 400px) {
+  .headerInner {
+    padding: 0 12px;
+  }
+
+  .logoText {
+    font-size: 0.84rem;
+  }
 }

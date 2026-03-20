@@ -86,6 +86,10 @@
   opacity: 0.9;
 }
 
+.sidebarLabel {
+  white-space: nowrap;
+}
+
 .content {
   flex: 1;
   padding: 24px 32px;
@@ -93,14 +97,80 @@
 }
 
 @media (max-width: 960px) {
+  .sidebar {
+    width: 74px;
+    padding: 18px 0;
+  }
+
+  .sidebarLogo {
+    justify-content: center;
+    padding: 0 0 16px;
+  }
+
+  .sidebarLogoText {
+    font-size: 1rem;
+  }
+
+  .sidebarUser {
+    display: none;
+  }
+
+  .sidebarNav {
+    align-items: center;
+  }
+
+  .sidebarLink {
+    width: 54px;
+    justify-content: center;
+    padding: 12px 0;
+    border-left-width: 0;
+    border-radius: 16px;
+  }
+
+  .sidebarLinkActive {
+    border-left-color: transparent;
+  }
+
+  .sidebarLabel {
+    display: none;
+  }
+
+  .content {
+    padding: 24px 20px;
+  }
+}
+
+@media (max-width: 640px) {
   .vaultWrap {
     display: block;
   }
 
   .sidebar {
     position: static;
+    top: auto;
     width: 100%;
     height: auto;
     overflow: visible;
+    padding: 12px 16px;
+    border-right: none;
+    border-bottom: 1px solid var(--bg-glass-border);
+  }
+
+  .sidebarLogo {
+    justify-content: flex-start;
+    padding: 0 0 12px;
+    margin-bottom: 10px;
+  }
+
+  .sidebarNav {
+    display: grid;
+    grid-template-columns: repeat(9, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .sidebarLink {
+    width: 100%;
+    min-width: 0;
+    justify-self: center;
   }
 }

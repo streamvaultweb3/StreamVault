@@ -151,12 +151,13 @@ export function VaultLayout() {
               key={item.to}
               to={item.to}
               end={item.end}
+              title={item.label}
               className={({ isActive }) =>
                 [styles.sidebarLink, isActive ? styles.sidebarLinkActive : ''].filter(Boolean).join(' ')
               }
             >
               <item.icon className={styles.sidebarIcon} />
-              {item.label}
+              <span className={styles.sidebarLabel}>{item.label}</span>
             </NavLink>
           ))}
           <button
@@ -164,9 +165,10 @@ export function VaultLayout() {
             className={styles.sidebarLink}
             onClick={openUpload}
             style={{ width: '100%', border: 'none', background: 'none', cursor: 'pointer', textAlign: 'left' }}
+            title="Upload"
           >
             <IconUpload className={styles.sidebarIcon} />
-            Upload
+            <span className={styles.sidebarLabel}>Upload</span>
           </button>
         </nav>
       </aside>
