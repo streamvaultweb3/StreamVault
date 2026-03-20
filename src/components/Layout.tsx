@@ -61,6 +61,39 @@ function getProfileSnapshotKey(walletAddress: string) {
   return `streamvault:profileSnapshot:${walletAddress.toLowerCase()}`;
 }
 
+function XIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path
+        fill="currentColor"
+        d="M18.244 2H21l-6.018 6.876L22 22h-5.482l-4.29-7.937L5.282 22H2.524l6.437-7.357L2 2h5.62l3.878 7.261L18.244 2Zm-.968 18.338h1.527L6.79 3.576H5.151l12.125 16.762Z"
+      />
+    </svg>
+  );
+}
+
+function GitHubIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path
+        fill="currentColor"
+        d="M12 .5a12 12 0 0 0-3.79 23.39c.6.11.82-.26.82-.58v-2.02c-3.34.73-4.04-1.42-4.04-1.42-.55-1.38-1.33-1.75-1.33-1.75-1.09-.74.08-.72.08-.72 1.2.08 1.84 1.23 1.84 1.23 1.08 1.84 2.82 1.31 3.5 1 .11-.77.42-1.31.76-1.61-2.67-.3-5.48-1.33-5.48-5.93 0-1.31.47-2.38 1.23-3.22-.12-.3-.53-1.53.12-3.19 0 0 1.01-.32 3.3 1.23a11.52 11.52 0 0 1 6 0c2.28-1.55 3.29-1.23 3.29-1.23.66 1.66.25 2.89.13 3.19.77.84 1.23 1.91 1.23 3.22 0 4.61-2.82 5.62-5.5 5.92.43.37.82 1.1.82 2.22v3.29c0 .32.21.7.83.58A12 12 0 0 0 12 .5Z"
+      />
+    </svg>
+  );
+}
+
+function DiscordIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path
+        fill="currentColor"
+        d="M20.32 4.37A16.72 16.72 0 0 0 16.2 3.1l-.2.4c1.62.42 2.37 1.02 2.37 1.02a13.3 13.3 0 0 0-4.2-.64 13.3 13.3 0 0 0-4.2.64s.75-.6 2.37-1.02l-.2-.4A16.72 16.72 0 0 0 3.68 4.37C1.07 8.31.37 12.15.72 15.93a16.98 16.98 0 0 0 5.06 2.57l1.08-1.77c-.58-.21-1.13-.48-1.65-.8.14.1.3.2.45.28 1.9 1.1 3.96 1.42 6.04 1.42 2.08 0 4.14-.32 6.04-1.42.15-.08.31-.18.45-.28-.52.32-1.07.59-1.65.8l1.08 1.77a16.98 16.98 0 0 0 5.06-2.57c.41-4.38-.7-8.18-2.36-11.56ZM9.58 13.6c-.99 0-1.8-.91-1.8-2.03 0-1.12.8-2.03 1.8-2.03 1 0 1.81.91 1.8 2.03 0 1.12-.8 2.03-1.8 2.03Zm4.84 0c-.99 0-1.8-.91-1.8-2.03 0-1.12.8-2.03 1.8-2.03 1 0 1.81.91 1.8 2.03 0 1.12-.8 2.03-1.8 2.03Z"
+      />
+    </svg>
+  );
+}
+
 export function Layout({ children }: { children: React.ReactNode }) {
   const { walletType, address, connect, disconnect, isConnecting } = useWallet();
   const { libs, isReady } = usePermaweb();
@@ -690,6 +723,40 @@ export function Layout({ children }: { children: React.ReactNode }) {
         </div>
       </header>
       <main className={styles.main}>{children}</main>
+      <footer className={styles.footer}>
+        <div className={styles.footerInner}>
+          <div className={styles.footerSocials}>
+            <a
+              href="https://x.com/StreamVaultweb3"
+              target="_blank"
+              rel="noopener noreferrer"
+              className={styles.footerLink}
+              aria-label="StreamVault on X"
+            >
+              <XIcon />
+            </a>
+            <a
+              href="https://github.com/Jharmony/StreamVault"
+              target="_blank"
+              rel="noopener noreferrer"
+              className={styles.footerLink}
+              aria-label="StreamVault on GitHub"
+            >
+              <GitHubIcon />
+            </a>
+            <a
+              href="https://discord.gg/ESn8edRJ5s"
+              target="_blank"
+              rel="noopener noreferrer"
+              className={styles.footerLink}
+              aria-label="StreamVault on Discord"
+            >
+              <DiscordIcon />
+            </a>
+          </div>
+          <p className={styles.footerCopy}>StreamVault 2026. Stream anywhere. Preserve forever.</p>
+        </div>
+      </footer>
 
       {isPublishOpen && typeof document !== 'undefined'
         ? createPortal(
