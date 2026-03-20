@@ -1,7 +1,7 @@
 import { connect, createDataItemSigner } from '@permaweb/aoconnect';
 import type { UdlConfig, RoyaltySplit } from './udl';
 
-const ao = connect();
+const ao = connect({ MODE: 'legacy' } as any);
 
 const MUSIC_REGISTRY_PROCESS =
   (import.meta as any).env?.VITE_AO_MUSIC_REGISTRY_PROCESS ||
@@ -95,4 +95,3 @@ export async function searchTracksOnAO(query: {
     return [];
   }
 }
-

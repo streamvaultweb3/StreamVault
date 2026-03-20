@@ -1,7 +1,7 @@
 import { connect, createDataItemSigner } from '@permaweb/aoconnect';
 import type { RoyaltySplit } from './udl';
 
-const ao = connect();
+const ao = connect({ MODE: 'legacy' } as any);
 
 const ROYALTY_PROCESS =
   (import.meta as any).env?.VITE_AO_ROYALTY_PROCESS ||
@@ -66,4 +66,3 @@ export async function getRoyaltyPayoutPlan(): Promise<Record<string, number>> {
     return {};
   }
 }
-

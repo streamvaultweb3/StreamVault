@@ -1,7 +1,7 @@
 import { connect, createDataItemSigner } from '@permaweb/aoconnect';
 import type { UdlConfig, RoyaltySplit } from './udl';
 
-const ao = connect();
+const ao = connect({ MODE: 'legacy' } as any);
 
 const LICENSE_ENGINE_PROCESS =
   (import.meta as any).env?.VITE_AO_LICENSE_ENGINE_PROCESS ||
@@ -123,4 +123,3 @@ export async function confirmLicensePaymentOnAO(args: {
   // (or the client) to fetch grants by id if needed.
   return null;
 }
-
