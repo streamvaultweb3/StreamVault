@@ -7,13 +7,21 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "diag:ao": "node tools/ao-diagnostics.mjs"
   },
   "dependencies": {
     "@ardrive/turbo-sdk": "^1.41.0",
+    "@arweave-wallet-kit/browser-wallet-strategy": "^0.1.1",
+    "@arweave-wallet-kit/core": "^0.1.1",
+    "@arweave-wallet-kit/react": "^0.3.2",
+    "@arweave-wallet-kit/styles": "^0.1.1",
+    "@arweave-wallet-kit/wander-strategy": "^0.1.2",
     "@audius/sdk": "^4.2.0",
-    "@permaweb/aoconnect": "^0.0.60",
+    "@permaweb/aoconnect": "^0.0.93",
     "@permaweb/libs": "^0.0.86",
+    "@vela-ventures/aosync-strategy": "^1.0.13",
+    "@wanderapp/connect": "^0.1.13",
     "arweave": "^1.15.7",
     "ethers": "^6.16.0",
     "react": "^18.3.1",

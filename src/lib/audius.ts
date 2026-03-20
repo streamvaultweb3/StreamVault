@@ -5,7 +5,7 @@ const AUDIUS_BEARER = import.meta.env.VITE_AUDIUS_BEARER_TOKEN as string | undef
 export interface AudiusTrack {
   id: string;
   title: string;
-  user_id: string;
+  user_id: string | number;
   user: {
     id: string;
     name: string;
@@ -20,6 +20,7 @@ export interface AudiusTrack {
 
 export interface AudiusUser {
   id: string;
+  user_id?: number | string;
   name: string;
   handle: string;
   profile_picture?: { '150x150'?: string; '480x480'?: string; '1000x1000'?: string };
@@ -30,6 +31,20 @@ export interface AudiusUser {
 }
 
 export interface AudiusPlaylist {
+  id: string;
+  playlist_name: string;
+  description?: string;
+  track_count: number;
+  permalink: string;
+  artwork?: { '150x150'?: string; '480x480'?: string; '1000x1000'?: string };
+  user: {
+    id: string;
+    name: string;
+    handle: string;
+  };
+}
+
+export interface AudiusAlbum {
   id: string;
   playlist_name: string;
   description?: string;
@@ -112,6 +127,13 @@ export async function getUserTracks(userId: string, limit = 20): Promise<AudiusT
 export async function getUserPlaylists(userId: string, limit = 20): Promise<AudiusPlaylist[]> {
   const data = await fetchApi<{ data: AudiusPlaylist[] }>(
     `/users/${userId}/playlists?limit=${limit}`
+  );
+  return data.data || [];
+}
+
+export async function getUserAlbums(userId: string, limit = 20): Promise<AudiusAlbum[]> {
+  const data = await fetchApi<{ data: AudiusAlbum[] }>(
+    `/users/${userId}/albums?limit=${limit}`
   );
   return data.data || [];
 }
