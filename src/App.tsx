@@ -1,10 +1,12 @@
-import { Routes, Route } from 'react-router-dom';
+import { useEffect, useRef } from 'react';
+import { Routes, Route, useLocation } from 'react-router-dom';
 import { Layout } from './components/Layout';
 import { Home } from './pages/Home';
 import { Artist } from './pages/Artist';
 import { Profile } from './pages/Profile';
 import { CreatorTools } from './pages/CreatorTools';
 import { NowPlayingBar } from './components/NowPlayingBar';
+import { configureAnalytics, trackPageView } from './lib/analytics';
 import { VaultLayout } from './pages/vault/VaultLayout';
 import { VaultTrending } from './pages/vault/VaultTrending';
 import { VaultExplore } from './pages/vault/VaultExplore';
@@ -13,9 +15,44 @@ import { VaultWallet } from './pages/vault/VaultWallet';
 import { VaultRewards } from './pages/vault/VaultRewards';
 import { VaultPlaceholder } from './pages/vault/VaultPlaceholder';
 
+const GA_MEASUREMENT_ID = 'G-HBLXEBQB7H';
+
+function getPageGroup(pathname: string): string {
+  if (pathname.startsWith('/vault')) return 'vault';
+  if (pathname.startsWith('/profile')) return 'profile';
+  if (pathname.startsWith('/artist')) return 'artist';
+  if (pathname.startsWith('/creator-tools')) return 'creator_tools';
+  return 'discover';
+}
+
+function RouteAnalytics() {
+  const location = useLocation();
+  const configuredRef = useRef(false);
+  const didTrackFirstRouteRef = useRef(false);
+
+  useEffect(() => {
+    if (!configuredRef.current) {
+      configureAnalytics(GA_MEASUREMENT_ID);
+      configuredRef.current = true;
+    }
+
+    const pagePath = `${location.pathname}${location.search}${location.hash}`;
+    if (!didTrackFirstRouteRef.current) {
+      didTrackFirstRouteRef.current = true;
+      return;
+    }
+    trackPageView(pagePath, undefined, {
+      page_group: getPageGroup(location.pathname),
+    });
+  }, [location.hash, location.pathname, location.search]);
+
+  return null;
+}
+
 export default function App() {
   return (
     <Layout>
+      <RouteAnalytics />
       <Routes>
         <Route path="/" element={<Home />} />
         <Route path="/artist/:id" element={<Artist />} />
