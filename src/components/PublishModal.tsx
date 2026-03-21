@@ -9,8 +9,9 @@ import {
   type PublishResult,
 } from '../lib/arweave';
 import { getSelectedOrLatestProfileByWallet } from '../lib/permaProfile';
-import { publishSampleToArweave, publishFullAsAtomicAsset, createFiatTopUpSession } from '../lib/publish';
+import { publishSampleToArweave, publishFullAsAtomicAsset, publishFullDirectToArweave, createFiatTopUpSession } from '../lib/publish';
 import type { UdlConfig, RoyaltySplit, UdlAiUse } from '../lib/udl';
+import { trackEvent } from '../lib/analytics';
 import styles from './PublishModal.module.css';
 
 interface PublishModalProps {
@@ -33,6 +34,7 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
   const [coverFile, setCoverFile] = useState<File | null>(null);
   const [description, setDescription] = useState('');
   const [royaltiesBps, setRoyaltiesBps] = useState<number>(500);
+  const [fullPublishMode, setFullPublishMode] = useState<'direct' | 'atomic'>('direct');
   const [useTurbo, setUseTurbo] = useState(false);
   const [turboToken, setTurboToken] = useState<'arweave' | 'ethereum' | 'base-eth' | 'solana' | 'base-usdc' | 'base-ario' | 'polygon-usdc' | 'pol'>('arweave');
   const [isAutoSample, setIsAutoSample] = useState(true);
@@ -75,11 +77,18 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
       return;
     }
     try {
+      trackEvent('turbo_top_up_attempt', {
+        amount_usd: amount,
+      });
       setIsTopUpLoading(true);
       setErrorMessage(null);
       const url = await createFiatTopUpSession({ amountUsd: amount, ownerAddress: address });
+      trackEvent('turbo_top_up_redirected', { amount_usd: amount });
       window.location.href = url;
     } catch (e: any) {
+      trackEvent('turbo_top_up_failed', {
+        reason: String(e?.message || 'top_up_error').slice(0, 200),
+      });
       setErrorMessage(e?.message || 'Failed to initialize Stripe checkout.');
     } finally {
       setIsTopUpLoading(false);
@@ -161,9 +170,19 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
     // #endregion agent log
     if (!address || !walletType || !libs) {
       // Show inline wallet chooser instead of a plain error
+      trackEvent('publish_blocked_wallet_required', {
+        tier,
+      });
       setShowWalletChooser(true);
       return;
     }
+    trackEvent('publish_attempt', {
+      tier,
+      wallet_type: walletType,
+      use_turbo: useTurbo,
+      turbo_token: useTurbo ? turboToken : 'none',
+      has_cover: Boolean(coverFile || generatedCover || track?.artwork),
+    });
     setStatus('uploading');
     setErrorMessage(null);
     setAppendWarning(null);
@@ -232,28 +251,53 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
         const udlConfig = buildUdlConfig();
         const splits = buildDefaultSplits();
 
-        res = await publishFullAsAtomicAsset(
-          {
-            audio: effectiveAudio,
-            title: customTitle || 'Unknown Track',
-            artist: customArtist || 'Unknown Artist',
-            description: description.trim() || undefined,
-            artworkUrl: (coverFile || generatedCover) ? undefined : track?.artwork,
-            artworkFile: (coverFile || generatedCover) || undefined,
-            royaltiesBps: Number.isFinite(royaltiesBps) ? royaltiesBps : undefined,
-            udl: udlConfig,
-            splits,
-            useTurbo,
-            turboPaymentToken: turboToken,
-          },
-          address,
-          { libs }
-        );
+        if (fullPublishMode === 'direct') {
+          res = await publishFullDirectToArweave(
+            {
+              audio: effectiveAudio,
+              title: customTitle || 'Unknown Track',
+              artist: customArtist || 'Unknown Artist',
+              description: description.trim() || undefined,
+              artworkUrl: (coverFile || generatedCover) ? undefined : track?.artwork,
+              artworkFile: (coverFile || generatedCover) || undefined,
+              udl: udlConfig,
+              splits,
+              useTurbo,
+              turboPaymentToken: turboToken,
+            },
+            address
+          );
+        } else {
+          res = await publishFullAsAtomicAsset(
+            {
+              audio: effectiveAudio,
+              title: customTitle || 'Unknown Track',
+              artist: customArtist || 'Unknown Artist',
+              description: description.trim() || undefined,
+              artworkUrl: (coverFile || generatedCover) ? undefined : track?.artwork,
+              artworkFile: (coverFile || generatedCover) || undefined,
+              royaltiesBps: Number.isFinite(royaltiesBps) ? royaltiesBps : undefined,
+              udl: udlConfig,
+              splits,
+              useTurbo,
+              turboPaymentToken: turboToken,
+            },
+            address,
+            { libs }
+          );
+        }
       }
       if (res.success && tier === 'full') {
         clearGeneratedCover();
         clearGeneratedAudio();
       }
+      trackEvent(res.success ? 'publish_success' : 'publish_failed', {
+        tier,
+        wallet_type: walletType || 'unknown',
+        use_turbo: useTurbo,
+        tx_id_present: Boolean(res.txId),
+        error: res.error ? String(res.error).slice(0, 200) : undefined,
+      });
       setResult(res);
       setStatus(res.success ? 'done' : 'error');
       if (res.error) setErrorMessage(res.error);
@@ -263,13 +307,18 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
           if (walletType === 'arweave' && libs?.addToZone) {
             const profile = await getSelectedOrLatestProfileByWallet(libs, address);
             if (profile?.id) {
+              const zonePath = tier === 'full' ? 'Tracks[]' : 'Samples[]';
               await libs.addToZone(
                 {
-                  path: 'Samples[]',
+                  path: zonePath,
                   data: {
                     txId: res.txId,
+                    kind: tier === 'full' ? 'full-track' : 'sample',
                     title: customTitle || 'Unknown Track',
                     artist: customArtist || 'Unknown Artist',
+                    source: track ? 'audius' : 'streamvault',
+                    sourceTrackId: track?.id || null,
+                    sourceArtistId: track?.artistId || null,
                     permawebUrl: res.permawebUrl,
                     arioUrl: res.arioUrl,
                     createdAt: new Date().toISOString(),
@@ -283,12 +332,15 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
           } else if (walletType === 'arweave') {
             setAppendWarning('Permaweb profile tools are not ready yet. Try again later.');
           }
-          const key = `streamvault:samples:${address.toLowerCase()}`;
+          const key = `streamvault:${tier === 'full' ? 'tracks' : 'samples'}:${address.toLowerCase()}`;
           const existing = JSON.parse(localStorage.getItem(key) || '[]') as Array<Record<string, any>>;
           const entry = {
             txId: res.txId,
+            kind: tier === 'full' ? 'full-track' : 'sample',
             title: customTitle || 'Unknown Track',
             artist: customArtist || 'Unknown Artist',
+            source: track ? 'audius' : 'streamvault',
+            sourceTrackId: track?.id || null,
             permawebUrl: res.permawebUrl,
             arioUrl: res.arioUrl,
             createdAt: new Date().toISOString(),
@@ -302,6 +354,12 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
       if (res.success && onSuccess) onSuccess(res);
     } catch (e: any) {
       console.error('[publish] Publish failed', e);
+      trackEvent('publish_failed', {
+        tier,
+        wallet_type: walletType || 'unknown',
+        use_turbo: useTurbo,
+        reason: String(e?.message || 'publish_error').slice(0, 200),
+      });
       setResult({ success: false, error: e?.message || 'Publish failed' });
       setErrorMessage(e?.message || 'Publish failed');
       setStatus('error');
@@ -468,6 +526,27 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
                 />
               </label>
               <div className={styles.licenseBlock}>
+                <p className={styles.licenseTitle}>Publish mode</p>
+                <label className={styles.checkLabel}>
+                  <input
+                    type="radio"
+                    name="full-publish-mode"
+                    checked={fullPublishMode === 'direct'}
+                    onChange={() => setFullPublishMode('direct')}
+                  />
+                  <span>Direct Arweave upload with StreamVault music tags. Recommended for now.</span>
+                </label>
+                <label className={styles.checkLabel}>
+                  <input
+                    type="radio"
+                    name="full-publish-mode"
+                    checked={fullPublishMode === 'atomic'}
+                    onChange={() => setFullPublishMode('atomic')}
+                  />
+                  <span>Atomic Asset on AO mainnet. Experimental until the spawn path is stable.</span>
+                </label>
+              </div>
+              <div className={styles.licenseBlock}>
                 <p className={styles.licenseTitle}>License & usage (UDL)</p>
                 <label className={styles.label}>
                   Usage
@@ -580,7 +659,9 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
                 Turbo uses the selected wallet for payment and credits.
               </p>
               <p className={styles.hint}>
-                Royalties are stored in standard metadata for future distribution/DEX integration.
+                {fullPublishMode === 'direct'
+                  ? 'Direct mode uploads the track as an ANS-104 DataItem via Turbo or a standard Arweave transaction, with StreamVault music tags for discovery.'
+                  : 'Royalties are stored in standard metadata for future distribution and AO-based atomic asset flows.'}
               </p>
             </>
           )}
@@ -641,11 +722,11 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
           >
             {status === 'uploading' || status === 'confirming'
               ? 'Publishing…'
-              : status === 'done'
-                ? 'Done'
-                : !address
-                  ? 'Connect wallet to publish'
-                  : `Publish ${tier === 'sample' ? 'sample' : 'full asset'}`}
+                : status === 'done'
+                  ? 'Done'
+                  : !address
+                    ? 'Connect wallet to publish'
+                  : `Publish ${tier === 'sample' ? 'sample' : fullPublishMode === 'direct' ? 'full track' : 'full asset'}`}
           </button>
         </div>
 
@@ -676,7 +757,23 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
               className={styles.publishBtn}
               style={{ width: '100%' }}
               disabled={isConnecting}
-              onClick={() => connect('arweave').then(() => setShowWalletChooser(false))}
+              onClick={() =>
+                connect('arweave')
+                  .then((addr) => {
+                    trackEvent('publish_wallet_connect_success', {
+                      wallet_type: 'arweave',
+                      address_prefix: addr ? `${addr.slice(0, 6)}...${addr.slice(-4)}` : 'unknown',
+                    });
+                    setShowWalletChooser(false);
+                  })
+                  .catch((e: any) => {
+                    trackEvent('publish_wallet_connect_failed', {
+                      wallet_type: 'arweave',
+                      reason: String(e?.message || 'connect_error').slice(0, 200),
+                    });
+                    setErrorMessage(String(e?.message || 'Failed to connect Arweave wallet.'));
+                  })
+              }
             >
               🔑 Arweave (Wander)
             </button>
@@ -685,7 +782,22 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
               className={styles.publishBtn}
               style={{ width: '100%', background: 'rgba(98,126,234,0.85)' }}
               disabled={isConnecting}
-              onClick={() => connect('ethereum').then(() => setShowWalletChooser(false))}
+              onClick={() =>
+                connect('ethereum')
+                  .then(() => {
+                    trackEvent('publish_wallet_connect_success', {
+                      wallet_type: 'ethereum',
+                    });
+                    setShowWalletChooser(false);
+                  })
+                  .catch((e: any) => {
+                    trackEvent('publish_wallet_connect_failed', {
+                      wallet_type: 'ethereum',
+                      reason: String(e?.message || 'connect_error').slice(0, 200),
+                    });
+                    setErrorMessage(String(e?.message || 'Failed to connect Ethereum wallet.'));
+                  })
+              }
             >
               🦊 Ethereum / MetaMask
             </button>
@@ -694,7 +806,22 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
               className={styles.publishBtn}
               style={{ width: '100%', background: 'rgba(20,180,130,0.85)' }}
               disabled={isConnecting}
-              onClick={() => connect('solana').then(() => setShowWalletChooser(false))}
+              onClick={() =>
+                connect('solana')
+                  .then(() => {
+                    trackEvent('publish_wallet_connect_success', {
+                      wallet_type: 'solana',
+                    });
+                    setShowWalletChooser(false);
+                  })
+                  .catch((e: any) => {
+                    trackEvent('publish_wallet_connect_failed', {
+                      wallet_type: 'solana',
+                      reason: String(e?.message || 'connect_error').slice(0, 200),
+                    });
+                    setErrorMessage(String(e?.message || 'Failed to connect Solana wallet.'));
+                  })
+              }
             >
               👻 Solana (Phantom)
             </button>

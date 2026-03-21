@@ -32,6 +32,17 @@ interface TurboUploadOptions {
   paymentToken: TurboPaymentToken;
 }
 
+interface FullAudioUploadArgs {
+  audio: Blob;
+  title: string;
+  artist: string;
+  creatorAddress: string;
+  useTurbo?: boolean;
+  turboPaymentToken?: TurboPaymentToken;
+  udl?: UdlConfig;
+  splits?: RoyaltySplit[];
+}
+
 async function uploadWithTurbo(args: TurboUploadOptions): Promise<string> {
   const win = typeof window !== 'undefined' ? (window as any) : null;
   const { TurboFactory, ArconnectSigner } = await import('@ardrive/turbo-sdk/web');
@@ -84,6 +95,70 @@ async function uploadWithTurbo(args: TurboUploadOptions): Promise<string> {
   });
 
   return result.id;
+}
+
+function buildFullAudioTags(args: FullAudioUploadArgs): { name: string; value: string }[] {
+  const tags: { name: string; value: string }[] = [
+    { name: 'App-Name', value: 'StreamVault' },
+    { name: 'App-Version', value: '1.0.0' },
+    { name: 'Protocol', value: 'StreamVault' },
+    { name: 'Data-Protocol', value: 'StreamVault' },
+    { name: 'Type', value: 'audio-full' },
+    { name: 'Content-Type', value: args.audio.type || 'audio/mpeg' },
+    { name: 'Title', value: args.title },
+    { name: 'Artist', value: args.artist },
+    { name: 'Creator', value: args.creatorAddress },
+    { name: 'Upload-Type', value: args.useTurbo ? 'turbo-ans104' : 'arweave-transaction' },
+    { name: 'Unix-Time', value: String(Date.now()) },
+  ];
+
+  if (args.udl) {
+    tags.push(
+      { name: 'License', value: args.udl.licenseId },
+      ...(args.udl.uri ? [{ name: 'License-URI', value: args.udl.uri }] : []),
+      { name: 'License-Use', value: args.udl.usage.join(',') },
+      { name: 'License-AI-Use', value: args.udl.aiUse },
+      { name: 'License-Fee', value: args.udl.fee },
+      { name: 'License-Fee-Unit', value: args.udl.interval },
+      { name: 'License-Currency', value: args.udl.currency },
+      ...(args.udl.attribution ? [{ name: 'License-Attribution', value: args.udl.attribution }] : []),
+      ...(args.udl.jurisdiction ? [{ name: 'License-Jurisdiction', value: args.udl.jurisdiction }] : []),
+    );
+  }
+
+  if (args.splits && args.splits.length > 0) {
+    tags.push({ name: 'Royalties-Splits', value: JSON.stringify(args.splits) });
+  }
+
+  return tags;
+}
+
+async function uploadFullAudio(args: FullAudioUploadArgs): Promise<string> {
+  const baseTags = buildFullAudioTags(args);
+
+  if (args.useTurbo) {
+    try {
+      return await uploadWithTurbo({
+        file: args.audio,
+        tags: baseTags,
+        paymentToken: args.turboPaymentToken || 'arweave',
+      });
+    } catch (e: any) {
+      const msg = String(e?.message || e || '');
+      const isGatewayIssue =
+        msg.includes('getPrice') ||
+        msg.includes('Bad Gateway') ||
+        msg.includes('502') ||
+        msg.includes('Website is offline');
+      if (!isGatewayIssue) throw e;
+    }
+  }
+
+  const data = await args.audio.arrayBuffer();
+  if (data.byteLength > 10 * 1024 * 1024) {
+    throw new Error('File too large for direct wallet upload (max ~10MB without Turbo).');
+  }
+  return uploadDataTx(data, args.audio.type || 'audio/mpeg', baseTags);
 }
 
 /**
@@ -273,78 +348,16 @@ export async function publishFullAsAtomicAsset(
         { name: 'Artist', value: args.artist },
       ]);
     }
-    let txId: string;
-    const baseTags: { name: string; value: string }[] = [
-      { name: 'App-Name', value: 'StreamVault' },
-      { name: 'Protocol', value: 'StreamVault' },
-      { name: 'App-Version', value: '1.0.0' },
-      { name: 'Type', value: 'audio-full' },
-      { name: 'Content-Type', value: args.audio.type || 'audio/mpeg' },
-      { name: 'Title', value: args.title },
-      { name: 'Artist', value: args.artist },
-      { name: 'Creator', value: creatorAddress },
-    ];
-
-    if (udl) {
-      baseTags.push(
-        { name: 'License', value: udl.licenseId },
-        ...(udl.uri ? [{ name: 'License-URI', value: udl.uri }] : []),
-        { name: 'License-Use', value: udl.usage.join(',') },
-        { name: 'License-AI-Use', value: udl.aiUse },
-        { name: 'License-Fee', value: udl.fee },
-        { name: 'License-Fee-Unit', value: udl.interval },
-        { name: 'License-Currency', value: udl.currency },
-        ...(udl.attribution ? [{ name: 'License-Attribution', value: udl.attribution }] : []),
-        ...(udl.jurisdiction ? [{ name: 'License-Jurisdiction', value: udl.jurisdiction }] : []),
-      );
-    }
-
-    if (splits && splits.length > 0) {
-      baseTags.push({ name: 'Royalties-Splits', value: JSON.stringify(splits) });
-    }
-
-    if (args.useTurbo) {
-      try {
-        txId = await uploadWithTurbo({
-          file: args.audio,
-          tags: baseTags,
-          paymentToken: args.turboPaymentToken || 'arweave',
-        });
-      } catch (e: any) {
-        const msg = String(e?.message || e || '');
-        // #region agent log
-        fetch('http://127.0.0.1:7939/ingest/0b5e774a-21c9-48b0-b426-076405dcd7ec',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'935ac8'},body:JSON.stringify({sessionId:'935ac8',runId:'pre-fix',hypothesisId:'H2',location:'src/lib/publish.ts:304',message:'turbo-upload-error',data:{message:msg,audioSize:args.audio.size},timestamp:Date.now()})}).catch(()=>{});
-        // #endregion agent log
-        const isGatewayIssue =
-          msg.includes('getPrice') ||
-          msg.includes('Bad Gateway') ||
-          msg.includes('502') ||
-          msg.includes('Website is offline');
-        if (isGatewayIssue && args.audio.size <= 10 * 1024 * 1024) {
-          // Fallback: try direct Arweave upload so creators can still publish when Turbo is down.
-          // #region agent log
-          fetch('http://127.0.0.1:7939/ingest/0b5e774a-21c9-48b0-b426-076405dcd7ec',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'935ac8'},body:JSON.stringify({sessionId:'935ac8',runId:'pre-fix',hypothesisId:'H3',location:'src/lib/publish.ts:318',message:'turbo-fallback-to-direct-arweave',data:{audioSize:args.audio.size},timestamp:Date.now()})}).catch(()=>{});
-          // #endregion agent log
-          const data = await args.audio.arrayBuffer();
-          txId = await uploadDataTx(
-            data,
-            args.audio.type || 'audio/mpeg',
-            baseTags
-          );
-        } else {
-          throw e;
-        }
-      }
-    } else {
-      const data = await args.audio.arrayBuffer();
-      if (data.byteLength > 10 * 1024 * 1024) return { success: false, error: 'File too large (max ~10MB).' };
-
-      txId = await uploadDataTx(
-        data,
-        args.audio.type || 'audio/mpeg',
-        baseTags
-      );
-    }
+    const txId = await uploadFullAudio({
+      audio: args.audio,
+      title: args.title,
+      artist: args.artist,
+      creatorAddress,
+      useTurbo: args.useTurbo,
+      turboPaymentToken: args.turboPaymentToken,
+      udl,
+      splits,
+    });
     const confirmed = await waitForConfirmation(txId).catch(() => false);
     const permawebUrl = `${GATEWAY}/${txId}`;
 
@@ -424,5 +437,59 @@ export async function publishFullAsAtomicAsset(
   } catch (e: any) {
     console.error('[publish] Full asset publish failed', e);
     return { success: false, error: e?.message || 'Full asset publish failed' };
+  }
+}
+
+export async function publishFullDirectToArweave(
+  args: {
+    audio: Blob;
+    title: string;
+    artist: string;
+    description?: string;
+    artworkUrl?: string;
+    artworkFile?: Blob;
+    udl?: UdlConfig;
+    splits?: RoyaltySplit[];
+    useTurbo?: boolean;
+    turboPaymentToken?: TurboPaymentToken;
+  },
+  creatorAddress: string
+): Promise<PublishResult> {
+  try {
+    console.info('[publish] Direct full upload started', { title: args.title, artist: args.artist });
+    let artworkUrlToUse = args.artworkUrl;
+    if (args.artworkFile) {
+      artworkUrlToUse = await uploadImageTx(args.artworkFile, [
+        { name: 'Title', value: args.title },
+        { name: 'Artist', value: args.artist },
+      ]);
+    }
+
+    const txId = await uploadFullAudio({
+      audio: args.audio,
+      title: args.title,
+      artist: args.artist,
+      creatorAddress,
+      useTurbo: args.useTurbo,
+      turboPaymentToken: args.turboPaymentToken,
+      udl: args.udl,
+      splits: args.splits,
+    });
+
+    const confirmed = await waitForConfirmation(txId).catch(() => false);
+    const permawebUrl = `${GATEWAY}/${txId}`;
+
+    console.info('[publish] Direct full upload complete', { txId, permawebUrl, artworkUrlToUse });
+
+    return {
+      success: true,
+      txId,
+      permawebUrl,
+      arioUrl: `${AR_IO_GATEWAY}/${txId}`,
+      confirmed,
+    };
+  } catch (e: any) {
+    console.error('[publish] Direct full upload failed', e);
+    return { success: false, error: e?.message || 'Direct full upload failed' };
   }
 }

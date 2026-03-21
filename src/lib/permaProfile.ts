@@ -78,6 +78,9 @@ function getReadNodeUrl(): string {
 }
 
 async function isProcessComputeHealthy(processId: string): Promise<boolean> {
+  if (!shouldPreferFallbackReads()) {
+    return true;
+  }
   const now = Date.now();
   const okUntil = PROFILE_COMPUTE_OK_UNTIL.get(processId) || 0;
   if (okUntil > now) return true;
@@ -210,6 +213,118 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): 
         reject(error);
       });
   });
+}
+
+function summarizeProfileShape(profile: any) {
+  if (!profile || typeof profile !== 'object') return null;
+  const store = profile?.store || profile?.Store || null;
+  const merged = store && typeof store === 'object' ? { ...profile, ...store } : profile;
+  return {
+    topLevelKeys: Object.keys(profile).slice(0, 40),
+    storeKeys: store && typeof store === 'object' ? Object.keys(store).slice(0, 40) : [],
+    identity: {
+      id: merged?.id || null,
+      owner: merged?.owner || merged?.Owner || merged?.walletAddress || merged?.WalletAddress || null,
+      username: merged?.username || merged?.Username || merged?.handle || merged?.Handle || null,
+      displayName: merged?.displayName || merged?.DisplayName || merged?.name || merged?.Name || null,
+      description: merged?.description || merged?.Description || merged?.bio || merged?.Bio || null,
+      thumbnail: merged?.thumbnail || merged?.Thumbnail || null,
+      banner: merged?.banner || merged?.Banner || null,
+      zoneType: merged?.zoneType || merged?.['Zone-Type'] || null,
+      dataProtocol: merged?.dataProtocol || merged?.['Data-Protocol'] || null,
+    },
+  };
+}
+
+export async function inspectProfileReadState(libs: any, profileId: string) {
+  const id = String(profileId || '').trim();
+  if (!id) throw new Error('Profile id is required.');
+
+  const base = getReadNodeUrl().replace(/\/+$/, '');
+  const result: Record<string, any> = {
+    profileId: id,
+    node: base,
+  };
+
+  try {
+    const sdk = libs?.getProfileById ? await withTimeout<any>(libs.getProfileById(id), 8000, 'inspectProfile:getProfileById') : null;
+    result.sdkGetProfileById = {
+      ok: Boolean(sdk?.id),
+      summary: summarizeProfileShape(sdk),
+      raw: sdk ?? null,
+    };
+  } catch (error: any) {
+    result.sdkGetProfileById = {
+      ok: false,
+      error: String(error?.message || error),
+    };
+  }
+
+  try {
+    const read = libs?.readProcess
+      ? await withTimeout<any>(
+        libs.readProcess({
+          processId: id,
+          action: 'Info',
+        }),
+        8000,
+        'inspectProfile:readProcess'
+      )
+      : null;
+    result.sdkReadProcessInfo = {
+      ok: Boolean(read),
+      summary: summarizeProfileShape(read),
+      raw: read ?? null,
+    };
+  } catch (error: any) {
+    result.sdkReadProcessInfo = {
+      ok: false,
+      error: String(error?.message || error),
+    };
+  }
+
+  try {
+    const zone = await hbRequest({
+      label: 'inspect-profile-zone',
+      url: `${base}/${id}~process@1.0/compute/cache/zone`,
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+    });
+    result.hbZoneCache = {
+      ok: zone.ok,
+      status: zone.status,
+      summary: summarizeProfileShape(zone.json),
+      raw: zone.json ?? zone.text,
+    };
+  } catch (error: any) {
+    result.hbZoneCache = {
+      ok: false,
+      error: String(error?.message || error),
+    };
+  }
+
+  try {
+    const info = await hbRequest({
+      label: 'inspect-profile-info',
+      url: `${base}/${id}~process@1.0/as=execution/compute&Action=Info`,
+      method: 'POST',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    result.hbActionInfo = {
+      ok: info.ok,
+      status: info.status,
+      summary: summarizeProfileShape(info.json),
+      raw: info.json ?? info.text,
+    };
+  } catch (error: any) {
+    result.hbActionInfo = {
+      ok: false,
+      error: String(error?.message || error),
+    };
+  }
+
+  return result;
 }
 
 export async function getProfileOptionsByWallet(
@@ -390,9 +505,8 @@ export async function getSelectedOrLatestProfileByWallet(
     try {
       const selected = await getProfileByIdSafe(libs, selectedId, { timeoutMs });
       if (selected?.id) return selected;
-      clearStoredProfileOverrideId(walletAddress);
     } catch {
-      clearStoredProfileOverrideId(walletAddress);
+      // Keep the override during indexing lag for freshly created profiles.
     }
   }
   return getLatestProfileByWallet(libs, walletAddress, opts);

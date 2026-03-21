@@ -27,6 +27,7 @@ import {
   getProfileBio,
   getProfileDisplayName,
   getProfileHandle,
+  inspectProfileReadState,
   getLatestProfileByWallet,
   getProfileOptionsByWallet,
   getProfileByIdSafe,
@@ -37,6 +38,7 @@ import {
 import { resolveProfileTokens, type ResolvedProfileToken } from '../lib/profileTokens';
 import { PublishModal } from '../components/PublishModal';
 import { useApi } from '@arweave-wallet-kit/react';
+import { createMainnetProfile } from '../lib/mainnetProfile';
 import styles from './Profile.module.css';
 
 type PermaProfile = {
@@ -171,18 +173,34 @@ export function Profile() {
     return raw ? String(raw) : null;
   }, [normalizedProfile]);
 
+  const connectedOverrideId = useMemo(() => {
+    if (!connectedAddress) return '';
+    return getStoredProfileOverrideId(connectedAddress);
+  }, [connectedAddress]);
+
+  const routeLooksLikeOwnWallet = useMemo(() => {
+    if (!routeProfileRef || !connectedAddress) return false;
+    return connectedAddress.toLowerCase() === routeProfileRef.toLowerCase();
+  }, [connectedAddress, routeProfileRef]);
+
+  const routeMatchesConnectedOverride = useMemo(() => {
+    if (!routeProfileRef || !connectedOverrideId) return false;
+    return routeProfileRef === connectedOverrideId;
+  }, [connectedOverrideId, routeProfileRef]);
+
   const isOwn = useMemo(() => {
     if (!connectedAddress) return false;
-    if (routeProfileRef && connectedAddress.toLowerCase() === routeProfileRef.toLowerCase()) return true;
+    if (routeLooksLikeOwnWallet) return true;
+    if (routeMatchesConnectedOverride) return true;
     if (profileWalletAddress && connectedAddress.toLowerCase() === profileWalletAddress.toLowerCase()) return true;
     return false;
-  }, [connectedAddress, profileWalletAddress, routeProfileRef]);
+  }, [connectedAddress, profileWalletAddress, routeLooksLikeOwnWallet, routeMatchesConnectedOverride]);
 
   const resolvedAddress = useMemo(() => {
     if (profileWalletAddress) return profileWalletAddress;
     if (isOwn && connectedAddress) return connectedAddress;
-    return routeProfileRef || null;
-  }, [connectedAddress, isOwn, profileWalletAddress, routeProfileRef]);
+    return routeLooksLikeOwnWallet ? routeProfileRef || null : null;
+  }, [connectedAddress, isOwn, profileWalletAddress, routeLooksLikeOwnWallet, routeProfileRef]);
 
   const avatarSource = useMemo(() => {
     return getProfileAvatar(normalizedProfile);
@@ -292,17 +310,49 @@ export function Profile() {
           setProfileOverrideInput(overrideId);
         }
         let p = overrideId ? await getProfileByIdSafe(libs, overrideId) : null;
+        if (!p?.id && overrideId && resolvedAddress && typeof window !== 'undefined') {
+          try {
+            const raw = localStorage.getItem(getProfileSnapshotKey(resolvedAddress));
+            if (raw) {
+              const cached = JSON.parse(raw);
+              if (cached?.id === overrideId) p = cached;
+            }
+          } catch {
+            // ignore snapshot parse errors
+          }
+        }
         if (!p?.id) {
           const byId = await getProfileByIdSafe(libs, routeProfileRef);
           if (byId?.id) p = byId;
         }
-        if (!p?.id) {
-          p = await getSelectedOrLatestProfileByWallet(libs, routeProfileRef);
+        if (!p?.id && resolvedAddress) {
+          p = await getSelectedOrLatestProfileByWallet(
+            libs,
+            resolvedAddress,
+            { useOverride: true }
+          );
+        }
+        if (
+          import.meta.env.DEV &&
+          profileDebug &&
+          overrideId &&
+          !p?.id
+        ) {
+          inspectProfileReadState(libs, overrideId)
+            .then((diag) => console.info('[profile:read:diag]', diag))
+            .catch((diagError) =>
+              console.info('[profile:read:diag:error]', String((diagError as any)?.message || diagError))
+            );
         }
         profileLog('[profile] data', p);
         profileLog('[profile] fetch result', { hasProfile: Boolean(p?.id) });
         if (!cancelled) {
-          const next = p || { id: null };
+          const keepExisting =
+            !p?.id &&
+            Boolean(overrideId) &&
+            Boolean(profile?.id) &&
+            String(profile?.id) === overrideId;
+          const next = keepExisting ? profile : (p || { id: null });
           setProfile(next);
           if (next?.id) PROFILE_CACHE.set(routeProfileRef, next);
           const walletForSnapshot = inferProfileWalletAddress(next, resolvedAddress);
@@ -330,6 +380,23 @@ export function Profile() {
       cancelled = true;
     };
   }, [isReady, libs, routeProfileRef, connectedAddress]);
+
+  useEffect(() => {
+    if (!(import.meta.env.DEV && profileDebug) || !libs || typeof window === 'undefined') return;
+    const target = window as any;
+    target.streamvaultProfileDebug = {
+      inspectProfile: (profileId: string) => inspectProfileReadState(libs, profileId),
+      compareProfiles: async (firstId: string, secondId: string) => ({
+        first: await inspectProfileReadState(libs, firstId),
+        second: await inspectProfileReadState(libs, secondId),
+      }),
+    };
+    return () => {
+      if (target.streamvaultProfileDebug) {
+        delete target.streamvaultProfileDebug;
+      }
+    };
+  }, [libs, profileDebug]);
 
   useEffect(() => {
     let cancelled = false;
@@ -780,19 +847,30 @@ export function Profile() {
       if (form.thumbnail) args.thumbnail = await fileToDataURL(form.thumbnail);
       if (form.banner) args.banner = await fileToDataURL(form.banner);
 
-      const profileId = await libs.createProfile(args);
-      profileLog('[profile] create success', { profileId });
-      if (profileId && libs.updateZone) {
-        const update: Record<string, string> = {
-          Name: form.displayName.trim(),
-          Handle: form.username.trim(),
-          Bio: form.description.trim(),
-        };
-        if (form.audiusHandle) update.AudiusHandle = form.audiusHandle;
-        await libs.updateZone(update, profileId);
-        profileLog('[profile] profile updated', { profileId });
+      const writableLibs = await getWritableLibs();
+      if (!writableLibs) {
+        throw new Error('Arweave writable profile client is not ready.');
       }
-      setProfile({ id: profileId, walletAddress: connectedAddress, username: args.username, displayName: args.displayName, description: args.description });
+      const created = await createMainnetProfile(writableLibs, {
+        username: args.username,
+        displayName: args.displayName,
+        description: args.description,
+        audiusHandle: form.audiusHandle,
+        thumbnail: args.thumbnail || null,
+        banner: args.banner || null,
+      });
+      const { profileId, thumbnailId, bannerId } = created;
+      profileLog('[profile] create success', { profileId });
+      setStoredProfileOverrideId(connectedAddress, profileId);
+      setProfile({
+        id: profileId,
+        walletAddress: connectedAddress,
+        username: args.username,
+        displayName: args.displayName,
+        description: args.description,
+        thumbnail: thumbnailId,
+        banner: bannerId,
+      });
       if (typeof window !== 'undefined') {
         const next = {
           id: profileId,
@@ -800,6 +878,8 @@ export function Profile() {
           username: args.username,
           displayName: args.displayName,
           description: args.description,
+          thumbnail: thumbnailId,
+          banner: bannerId,
         };
         try {
           localStorage.setItem(getProfileSnapshotKey(connectedAddress), JSON.stringify(next));
@@ -814,11 +894,11 @@ export function Profile() {
       }
       setCreateOpen(false);
 
-      if (profileId && localSamples.length > 0 && libs.addToZone) {
+      if (profileId && localSamples.length > 0 && writableLibs.addToZone) {
         setSyncing(true);
         try {
           for (const sample of localSamples) {
-            await libs.addToZone(
+            await writableLibs.addToZone(
               {
                 path: 'Samples[]',
                 data: sample,
@@ -836,16 +916,29 @@ export function Profile() {
 
       // Best-effort refresh (indexing may lag)
       try {
-        const fresh = await getSelectedOrLatestProfileByWallet(libs, connectedAddress);
-        if (fresh) setProfile(fresh);
+        const fresh = await getSelectedOrLatestProfileByWallet(libs, connectedAddress, { useOverride: true });
+        if (fresh?.id) setProfile(fresh);
       } catch {
         // ignore - eventual consistency
       }
     } catch (e: any) {
       console.error('[profile] create failed', e);
       const msg = String(e?.message || '');
-      if (msg.includes('not allowed on this SU') || msg.includes('Process') && msg.includes('not allowed')) {
-        setError('Permaweb profile creation is not available on this node right now. Try again later or use an AO mainnet-enabled environment.');
+      const isLocalhost =
+        typeof window !== 'undefined' &&
+        /^(localhost|127\.0\.0\.1)$/i.test(window.location.hostname);
+      if (msg.includes('not allowed on this SU') || (msg.includes('Process') && msg.includes('not allowed'))) {
+        setError('Profile creation hit an AO network mismatch. The app is trying to create a mainnet profile through a non-mainnet scheduler unit.');
+      } else if (
+        isLocalhost &&
+        (msg.includes('Error spawning process') ||
+          msg.includes('HTTP request failed') ||
+          msg.includes('Gateway Timeout') ||
+          msg.includes('Failed to fetch'))
+      ) {
+        setError('Mainnet profile creation from localhost is being blocked or timing out at the HyperBEAM transport layer. Test this same flow from a preview or production deployment instead of localhost.');
+      } else if (msg.includes('Error spawning process')) {
+        setError('Mainnet profile spawning failed. This usually means the AO mainnet process constants or authority tags are mismatched.');
       } else {
         setError(msg || 'Profile creation failed');
       }

@@ -20,7 +20,8 @@ import styles from './Home.module.css';
 import { useWallet } from '../context/WalletContext';
 import { usePermaweb } from '../context/PermawebContext';
 import { CreateProfileModal } from '../components/CreateProfileModal';
-import { getSelectedOrLatestProfileByWallet } from '../lib/permaProfile';
+import { getSelectedOrLatestProfileByWallet, setStoredProfileOverrideId } from '../lib/permaProfile';
+import { createMainnetProfile } from '../lib/mainnetProfile';
 
 function mapAudiusToTrack(a: AudiusTrack): Track {
   return {
@@ -36,7 +37,7 @@ function mapAudiusToTrack(a: AudiusTrack): Track {
 
 export function Home() {
   const { address, walletType } = useWallet();
-  const { libs, isReady } = usePermaweb();
+  const { libs, isReady, getWritableLibs } = usePermaweb();
   const [tracks, setTracks] = useState<Track[]>([]);
   const [loading, setLoading] = useState(true);
   const [discoverLimit, setDiscoverLimit] = useState(24);
@@ -171,24 +172,40 @@ export function Home() {
       };
       if (form.thumbnail) args.thumbnail = await fileToDataURL(form.thumbnail);
       if (form.banner) args.banner = await fileToDataURL(form.banner);
-      const profileId = await libs.createProfile(args);
-      console.info('[profile] create success', { profileId });
-      if (profileId && libs.updateZone) {
-        const update: Record<string, string> = {
-          Name: form.displayName.trim(),
-          Handle: form.username.trim(),
-          Bio: form.description.trim(),
-        };
-        if (form.audiusHandle) update.AudiusHandle = form.audiusHandle;
-        await libs.updateZone(update, profileId);
-        console.info('[profile] profile updated', { profileId });
+      const writableLibs = await getWritableLibs();
+      if (!writableLibs) {
+        throw new Error('Arweave writable profile client is not ready.');
       }
+      const created = await createMainnetProfile(writableLibs, {
+        username: args.username,
+        displayName: args.displayName,
+        description: args.description,
+        audiusHandle: form.audiusHandle,
+        thumbnail: args.thumbnail || null,
+        banner: args.banner || null,
+      });
+      const { profileId } = created;
+      console.info('[profile] create success', { profileId });
+      setStoredProfileOverrideId(address, profileId);
       setCreateOpen(false);
     } catch (e: any) {
       console.error('[profile] create failed', e);
       const msg = String(e?.message || '');
+      const isLocalhost =
+        typeof window !== 'undefined' &&
+        /^(localhost|127\.0\.0\.1)$/i.test(window.location.hostname);
       if (msg.includes('not allowed on this SU') || (msg.includes('Process') && msg.includes('not allowed'))) {
-        setCreateError('Permaweb profile creation is not available on this node. Try an AO mainnet-enabled environment.');
+        setCreateError('Profile creation hit an AO network mismatch. The app is trying to create a mainnet profile through a non-mainnet scheduler unit.');
+      } else if (
+        isLocalhost &&
+        (msg.includes('Error spawning process') ||
+          msg.includes('HTTP request failed') ||
+          msg.includes('Gateway Timeout') ||
+          msg.includes('Failed to fetch'))
+      ) {
+        setCreateError('Mainnet profile creation from localhost is being blocked or timing out at the HyperBEAM transport layer. Test this same flow from a preview or production deployment instead of localhost.');
+      } else if (msg.includes('Error spawning process')) {
+        setCreateError('Mainnet profile spawning failed. This usually means the AO mainnet process constants or authority tags are mismatched.');
       } else {
         setCreateError(msg || 'Profile creation failed');
       }
@@ -225,7 +242,7 @@ export function Home() {
         return;
       }
       try {
-        const profile = await getSelectedOrLatestProfileByWallet(libs, address);
+        const profile = await getSelectedOrLatestProfileByWallet(libs, address, { useOverride: true });
         if (!cancelled) setHasPermaProfile(Boolean(profile?.id));
       } catch {
         if (!cancelled) setHasPermaProfile(false);

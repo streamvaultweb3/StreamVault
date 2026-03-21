@@ -19,7 +19,7 @@
     "@arweave-wallet-kit/wander-strategy": "^0.1.2",
     "@audius/sdk": "^4.2.0",
     "@permaweb/aoconnect": "^0.0.93",
-    "@permaweb/libs": "^0.0.86",
+    "@permaweb/libs": "^0.0.91",
     "@vela-ventures/aosync-strategy": "^1.0.13",
     "@wanderapp/connect": "^0.1.13",
     "arweave": "^1.15.7",

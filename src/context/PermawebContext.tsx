@@ -16,10 +16,8 @@ interface PermawebContextValue {
 
 const PermawebContext = createContext<PermawebContextValue | null>(null);
 const DEFAULT_MAINNET_AO_URL = 'https://push.forward.computer';
-const DEFAULT_MAINNET_AO_AUTHORITY = 'YUsEnCSlxvOMxRd1qG6rkaPwMgi3xOorfDfYJoMDndA';
+const DEFAULT_MAINNET_AO_AUTHORITY = 'fcoN_xJeisVsPXA-trzVAuIiqO3ydLQxM-L4XbrQKzY';
 const DEFAULT_MAINNET_AO_SCHEDULER = 'n_XZJhUnmldNFo4dhajoPZWhBXuJk-OcQr5JQ49c4Zo';
-const AUTH_DISCOVERY_CACHE = new Map<string, { at: number; authority: string | null }>();
-const AUTH_DISCOVERY_TTL_MS = 5 * 60 * 1000;
 
 function toGatewayHost(input: string | undefined): string {
   const fallback = 'https://ao-search-gateway.goldsky.com';
@@ -34,26 +32,6 @@ function cleanEnv(value: string | undefined): string | null {
   if (!value) return null;
   const trimmed = value.trim();
   return trimmed ? trimmed : null;
-}
-
-async function discoverNodeAuthority(url: string): Promise<string | null> {
-  const cached = AUTH_DISCOVERY_CACHE.get(url);
-  const fresh = cached && Date.now() - cached.at < AUTH_DISCOVERY_TTL_MS;
-  if (fresh) return cached?.authority || null;
-  try {
-    const endpoint = `${url.replace(/\/$/, '')}/~meta@1.0/info/address`;
-    const res = await fetch(endpoint, {
-      method: 'GET',
-      headers: { Accept: 'text/plain,application/json' },
-    });
-    const text = (await res.text()).trim();
-    const authority = res.ok && text ? text : null;
-    AUTH_DISCOVERY_CACHE.set(url, { at: Date.now(), authority });
-    return authority;
-  } catch {
-    AUTH_DISCOVERY_CACHE.set(url, { at: Date.now(), authority: null });
-    return null;
-  }
 }
 
 export function PermawebProvider({ children }: { children: React.ReactNode }) {
@@ -82,9 +60,7 @@ export function PermawebProvider({ children }: { children: React.ReactNode }) {
     const aoScheduler =
       cleanEnv(import.meta.env.VITE_AO_SCHEDULER as string | undefined) ||
       DEFAULT_MAINNET_AO_SCHEDULER;
-    const discoveredAuthority = aoMode === 'mainnet' ? await discoverNodeAuthority(aoUrl) : null;
     const aoAuthority =
-      discoveredAuthority ||
       cleanEnv(import.meta.env.VITE_AO_AUTHORITY as string | undefined) ||
       DEFAULT_MAINNET_AO_AUTHORITY;
     const profileGateway = toGatewayHost(gqlUrlRaw);
@@ -150,12 +126,6 @@ export function PermawebProvider({ children }: { children: React.ReactNode }) {
         DEFAULT_MAINNET_AO_AUTHORITY;
       const gqlUrl = gqlUrlRaw;
       const profileGateway = toGatewayHost(gqlUrlRaw);
-
-      // If authority is intentionally left blank (or default likely wrong for custom local node),
-      // try to discover it from the node's meta endpoint.
-      if (aoMode === 'mainnet') {
-        aoAuthority = (await discoverNodeAuthority(aoUrl)) || aoAuthority;
-      }
 
       if (aoDebug) {
         console.info('[ao] init', {
