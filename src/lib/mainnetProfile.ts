@@ -8,7 +8,9 @@ type ProfileCreateArgs = {
 };
 
 import {
+  MAINNET_ZONE_SOURCE,
   runMainnetSpawnDiagnostic,
+  spawnProcessDirect,
 } from './aoSpawnDiagnostic';
 
 const MAINNET_AO_URL = 'https://push.forward.computer';
@@ -57,7 +59,7 @@ export async function createMainnetProfile(
   libs: any,
   args: ProfileCreateArgs
 ): Promise<{ profileId: string; thumbnailId: string | null; bannerId: string | null }> {
-  if (!libs?.createProfile) {
+  if (!libs) {
     throw new Error('Writable permaweb mainnet client is not ready.');
   }
 
@@ -76,16 +78,34 @@ export async function createMainnetProfile(
   }
 
   try {
-    const profileId = await libs.createProfile({
-      username: args.username,
-      displayName: args.displayName,
-      description: args.description,
-      ...(args.thumbnail ? { thumbnail: args.thumbnail } : {}),
-      ...(args.banner ? { banner: args.banner } : {}),
+    const tags = [
+      { name: 'On-Boot', value: MAINNET_ZONE_SOURCE },
+      { name: 'Data-Protocol', value: 'ao' },
+      { name: 'Zone-Type', value: 'User' },
+      { name: 'Bootloader-Username', value: args.username },
+      { name: 'Bootloader-DisplayName', value: args.displayName },
+      { name: 'Bootloader-Description', value: args.description },
+      ...(thumbnailId ? [{ name: 'Bootloader-Thumbnail', value: thumbnailId }] : []),
+      ...(bannerId ? [{ name: 'Bootloader-Banner', value: bannerId }] : []),
+    ];
+
+    const { processId: profileId } = await spawnProcessDirect({
+      tags,
+      skipInit: true,
     });
 
     if (!profileId) {
       throw new Error('permaweb-libs createProfile returned no profile id.');
+    }
+
+    if (import.meta.env.DEV) {
+      console.info('[ao:profile] spawn tags', {
+        profileId,
+        thumbnailId,
+        bannerId,
+        includesThumbnailTag: Boolean(thumbnailId),
+        includesBannerTag: Boolean(bannerId),
+      });
     }
 
     if (import.meta.env.DEV && args.audiusHandle) {

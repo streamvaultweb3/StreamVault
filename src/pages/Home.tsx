@@ -158,13 +158,6 @@ export function Home() {
     setCreateError(null);
     try {
       console.info('[profile] create start', { address, audiusHandle: form.audiusHandle });
-      const existing = await getSelectedOrLatestProfileByWallet(libs, address);
-      if (existing?.id) {
-        console.info('[profile] existing profile found', { profileId: existing.id });
-        setCreateError('Profile already exists for this wallet. Open your profile to view it.');
-        setCreateOpen(false);
-        return;
-      }
       const args: any = {
         username: form.username.trim(),
         displayName: form.displayName.trim(),

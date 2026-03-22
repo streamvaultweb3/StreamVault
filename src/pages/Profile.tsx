@@ -832,13 +832,6 @@ export function Profile() {
     setError(null);
     try {
       profileLog('[profile] create start', { address: connectedAddress, audiusHandle: form.audiusHandle });
-      const existing = await getSelectedOrLatestProfileByWallet(libs, connectedAddress);
-      if (existing?.id) {
-        profileLog('[profile] existing profile found', { profileId: existing.id });
-        setProfile(existing);
-        setCreateOpen(false);
-        return;
-      }
       const args: any = {
         username: form.username.trim(),
         displayName: form.displayName.trim(),

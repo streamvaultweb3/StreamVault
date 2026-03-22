@@ -2,7 +2,8 @@ import { connect, createDataItemSigner } from '@permaweb/aoconnect';
 
 export const MAINNET_AO_URL = 'https://push.forward.computer';
 export const MAINNET_AO_MODULE = 'ISShJH1ij-hPPt9St5UFFr_8Ys3Kj5cyg7zrMGt7H9s';
-export const MAINNET_AO_SCHEDULER = 'n_XZJhUnmldNFo4dhajoPZWhBXuJk-OcQr5JQ49c4Zo';
+export const MAINNET_AO_SCHEDULER = '_GQ33BkPtZrqxA84vM8Zk-N2aO0toNNu_C-l-rawrBA';
+export const MAINNET_ZONE_SOURCE = 'd4iFzJ4gxQRPHLuF13C7ncHgd-_yGGV8MtZSZmgLn7Y';
 
 type TraceEntry = {
   url: string;

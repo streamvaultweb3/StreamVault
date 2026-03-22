@@ -17,7 +17,7 @@ interface PermawebContextValue {
 const PermawebContext = createContext<PermawebContextValue | null>(null);
 const DEFAULT_MAINNET_AO_URL = 'https://push.forward.computer';
 const DEFAULT_MAINNET_AO_AUTHORITY = 'fcoN_xJeisVsPXA-trzVAuIiqO3ydLQxM-L4XbrQKzY';
-const DEFAULT_MAINNET_AO_SCHEDULER = 'n_XZJhUnmldNFo4dhajoPZWhBXuJk-OcQr5JQ49c4Zo';
+const DEFAULT_MAINNET_AO_SCHEDULER = '_GQ33BkPtZrqxA84vM8Zk-N2aO0toNNu_C-l-rawrBA';
 const DEFAULT_ARWEAVE_GATEWAY = {
   host: 'arweave.net',
   port: 443,
