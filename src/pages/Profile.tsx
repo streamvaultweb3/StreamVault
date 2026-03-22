@@ -853,6 +853,8 @@ export function Profile() {
         banner: args.banner || null,
       });
       const { profileId, thumbnailId, bannerId } = created;
+      const immediateThumbnail = args.thumbnail || thumbnailId || null;
+      const immediateBanner = args.banner || bannerId || null;
       profileLog('[profile] create success', { profileId });
       setStoredProfileOverrideId(connectedAddress, profileId);
       setProfile({
@@ -861,8 +863,8 @@ export function Profile() {
         username: args.username,
         displayName: args.displayName,
         description: args.description,
-        thumbnail: thumbnailId,
-        banner: bannerId,
+        thumbnail: immediateThumbnail,
+        banner: immediateBanner,
       });
       if (typeof window !== 'undefined') {
         const next = {
@@ -871,8 +873,8 @@ export function Profile() {
           username: args.username,
           displayName: args.displayName,
           description: args.description,
-          thumbnail: thumbnailId,
-          banner: bannerId,
+          thumbnail: immediateThumbnail,
+          banner: immediateBanner,
         };
         try {
           localStorage.setItem(getProfileSnapshotKey(connectedAddress), JSON.stringify(next));

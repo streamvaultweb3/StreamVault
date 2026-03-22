@@ -4,8 +4,8 @@ import { useWallet } from '../context/WalletContext';
 import { useAudiusAuth } from '../context/AudiusAuthContext';
 import { usePermaweb } from '../context/PermawebContext';
 import {
-  clearStoredProfileOverrideId,
   getProfileAvatar,
+  getProfileByIdSafe,
   getProfileHandle,
   getSelectedOrLatestProfileByWallet,
   getStoredProfileOverrideId,
@@ -229,15 +229,23 @@ export function Layout({ children }: { children: React.ReactNode }) {
       try {
         const overrideId = getStoredProfileOverrideId(address);
         let loaded: any = null;
-        if (overrideId && libs.getProfileById) {
-          loaded = await libs.getProfileById(overrideId);
+        if (overrideId) {
+          loaded = await getProfileByIdSafe(libs, overrideId);
           if (!loaded?.id) {
             loaded = null;
-            clearStoredProfileOverrideId(address);
+            try {
+              const raw = localStorage.getItem(getProfileSnapshotKey(address));
+              if (raw) {
+                const cached = JSON.parse(raw);
+                if (cached?.id === overrideId) loaded = cached;
+              }
+            } catch {
+              // ignore snapshot parse errors
+            }
           }
         }
         if (!loaded) {
-          loaded = await getSelectedOrLatestProfileByWallet(libs, address);
+          loaded = await getSelectedOrLatestProfileByWallet(libs, address, { useOverride: true });
         }
         if (!cancelled) {
           const next = loaded || { id: null };
@@ -441,6 +449,19 @@ export function Layout({ children }: { children: React.ReactNode }) {
           <span className={styles.walletMenuType}>{String(normalizedProfile.id).slice(0, 14)}…</span>
         </div>
       )}
+      <div className={styles.walletMenuSection}>
+        <span className={styles.walletMenuType}>
+          No primary ArNS name found for this wallet.
+        </span>
+        <a
+          href="https://arns.app"
+          target="_blank"
+          rel="noopener noreferrer"
+          className={styles.walletMenuHintLink}
+        >
+          Register an ArNS name at arns.app
+        </a>
+      </div>
       <Link
         to={profileHref}
         className={styles.walletMenuAction}
@@ -564,6 +585,8 @@ export function Layout({ children }: { children: React.ReactNode }) {
           showBalance={false}
           showProfilePicture={false}
           profileModal={false}
+          useArNS={false}
+          useAns={false}
         >
           Arweave (Wallet Kit)
         </ConnectButton>

@@ -248,6 +248,16 @@
   gap: 4px;
 }
 
+.walletMenuHintLink {
+  font-size: var(--text-sm);
+  color: var(--accent-color);
+  text-decoration: none;
+}
+
+.walletMenuHintLink:hover {
+  text-decoration: underline;
+}
+
 .walletMenuAction {
   padding: 10px 12px;
   font-size: var(--text-sm);
