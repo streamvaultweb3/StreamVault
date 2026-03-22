@@ -91,7 +91,6 @@ export async function createMainnetProfile(
 
     const { processId: profileId } = await spawnProcessDirect({
       tags,
-      skipInit: true,
     });
 
     if (!profileId) {

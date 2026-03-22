@@ -4,6 +4,7 @@ export const MAINNET_AO_URL = 'https://push.forward.computer';
 export const MAINNET_AO_MODULE = 'ISShJH1ij-hPPt9St5UFFr_8Ys3Kj5cyg7zrMGt7H9s';
 export const MAINNET_AO_SCHEDULER = 'n_XZJhUnmldNFo4dhajoPZWhBXuJk-OcQr5JQ49c4Zo';
 export const MAINNET_ZONE_SOURCE = 'd4iFzJ4gxQRPHLuF13C7ncHgd-_yGGV8MtZSZmgLn7Y';
+export const MAINNET_AO_AUTHORITY = 'fcoN_xJeisVsPXA-trzVAuIiqO3ydLQxM-L4XbrQKzY';
 
 type TraceEntry = {
   url: string;
@@ -34,11 +35,20 @@ function sanitizeTags(tags: Array<{ name: string; value: string }>) {
   }));
 }
 
+function getTagValue(tags: Array<{ name: string; value: string }>, name: string): string | null {
+  const tag = tags.find((entry) => entry.name === name);
+  return tag?.value || null;
+}
+
 function withRequiredAoTags(tags: Array<{ name: string; value: string }>) {
   const next = [...tags];
   const hasDataProtocol = next.some((tag) => tag.name === 'Data-Protocol');
+  const hasAuthority = next.some((tag) => tag.name === 'Authority');
   if (!hasDataProtocol) {
     next.unshift({ name: 'Data-Protocol', value: 'ao' });
+  }
+  if (!hasAuthority) {
+    next.unshift({ name: 'Authority', value: MAINNET_AO_AUTHORITY });
   }
   return next;
 }
@@ -86,18 +96,38 @@ function createMainnetAo(trace: TraceEntry[]) {
 export async function spawnProcessDirect(args: SpawnProcessArgs) {
   const trace: TraceEntry[] = [];
   const { ao, signer } = createMainnetAo(trace);
-  const tags = withRequiredAoTags(sanitizeTags([
+  const rawTags = sanitizeTags([
     { name: 'Process-Timestamp', value: Date.now().toString() },
     ...(args.tags || []),
-  ]));
+  ]);
+  const onBoot = getTagValue(rawTags, 'On-Boot');
+  const spawnTags = withRequiredAoTags(
+    onBoot ? rawTags.filter((tag) => tag.name !== 'On-Boot') : rawTags
+  );
 
   const processId = await ao.spawn({
     module: args.module || MAINNET_AO_MODULE,
     scheduler: args.scheduler || MAINNET_AO_SCHEDULER,
     signer,
-    tags,
+    tags: spawnTags,
     data: args.data,
   });
+
+  if (onBoot) {
+    const source = await fetch(`https://arweave.net/${onBoot}`).then((res) => {
+      if (!res.ok) throw new Error(`Failed to fetch On-Boot source: HTTP ${res.status}`);
+      return res.text();
+    });
+    await ao.message({
+      process: processId,
+      signer,
+      tags: [
+        { name: 'Action', value: 'Eval' },
+        { name: 'Message-Timestamp', value: Date.now().toString() },
+      ],
+      data: source,
+    });
+  }
 
   if (!args.skipInit) {
     await ao.message({
