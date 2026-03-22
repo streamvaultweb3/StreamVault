@@ -180,6 +180,7 @@ export function Home() {
       const { profileId } = created;
       console.info('[profile] create success', { profileId });
       setStoredProfileOverrideId(address, profileId);
+      setHasPermaProfile(true);
       setCreateOpen(false);
     } catch (e: any) {
       console.error('[profile] create failed', e);

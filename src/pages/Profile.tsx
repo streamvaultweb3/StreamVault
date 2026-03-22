@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
 import { useWallet } from '../context/WalletContext';
 import { usePermaweb } from '../context/PermawebContext';
 import { useAudiusAuth } from '../context/AudiusAuthContext';
@@ -97,6 +97,7 @@ function fileToDataURL(file: File): Promise<string> {
 }
 
 export function Profile() {
+  const navigate = useNavigate();
   const profileDebug = import.meta.env.DEV && String(import.meta.env.VITE_DEBUG_PROFILE || '') === '1';
   const profileLog = (...args: any[]) => {
     if (profileDebug) console.info(...args);
@@ -888,6 +889,7 @@ export function Profile() {
         );
       }
       setCreateOpen(false);
+      navigate(`/profile/${profileId}`, { replace: true });
 
       if (profileId && localSamples.length > 0 && writableLibs.addToZone) {
         setSyncing(true);
@@ -958,6 +960,10 @@ export function Profile() {
     setCreating(true);
     setError(null);
     try {
+      const writableLibs = await getWritableLibs();
+      if (!writableLibs) {
+        throw new Error('Arweave writable profile client is not ready.');
+      }
       const args: any = {
         username: form.username.trim(),
         displayName: form.displayName.trim(),
@@ -974,9 +980,9 @@ export function Profile() {
         args.banner = form.bannerValue;
       }
 
-      await libs.updateProfile(args, normalizedProfile.id);
-      if (libs.updateZone) {
-        await libs.updateZone(
+      await writableLibs.updateProfile(args, normalizedProfile.id);
+      if (writableLibs.updateZone) {
+        await writableLibs.updateZone(
           {
             Name: form.displayName.trim(),
             Handle: form.username.trim(),
@@ -986,19 +992,30 @@ export function Profile() {
           normalizedProfile.id
         );
       }
+      const optimistic = {
+        ...normalizedProfile,
+        username: form.username.trim(),
+        displayName: form.displayName.trim(),
+        description: form.description.trim(),
+        thumbnail: args.thumbnail || normalizedProfile?.thumbnail || normalizedProfile?.Thumbnail || null,
+        banner: args.banner || normalizedProfile?.banner || normalizedProfile?.Banner || null,
+        audiusHandle: form.audiusHandle?.trim() || '',
+      };
+      setProfile(optimistic);
       const fresh =
-        (await libs.getProfileById?.(normalizedProfile.id)) ||
-        (resolvedAddress ? await getSelectedOrLatestProfileByWallet(libs, resolvedAddress) : null);
+        (await writableLibs.getProfileById?.(normalizedProfile.id)) ||
+        (resolvedAddress ? await getSelectedOrLatestProfileByWallet(writableLibs, resolvedAddress, { useOverride: true }) : null);
       if (fresh) setProfile(fresh);
-      if (fresh && connectedAddress && typeof window !== 'undefined') {
+      const nextProfile = fresh || optimistic;
+      if (nextProfile && connectedAddress && typeof window !== 'undefined') {
         try {
-          localStorage.setItem(getProfileSnapshotKey(connectedAddress), JSON.stringify(fresh));
+          localStorage.setItem(getProfileSnapshotKey(connectedAddress), JSON.stringify(nextProfile));
         } catch {
           // ignore storage failures
         }
         window.dispatchEvent(
           new CustomEvent('streamvault:profile-updated', {
-            detail: { address: connectedAddress, profile: fresh },
+            detail: { address: connectedAddress, profile: nextProfile },
           })
         );
       }
