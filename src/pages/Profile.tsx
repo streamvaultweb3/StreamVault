@@ -213,6 +213,19 @@ export function Profile() {
     return getProfileBanner(normalizedProfile);
   }, [normalizedProfile]);
 
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const openEdit = () => {
+      if (walletType === 'arweave' && isOwn && normalizedProfile?.id) {
+        setEditOpen(true);
+      }
+    };
+    window.addEventListener('streamvault:open-edit-profile', openEdit as EventListener);
+    return () => {
+      window.removeEventListener('streamvault:open-edit-profile', openEdit as EventListener);
+    };
+  }, [isOwn, normalizedProfile?.id, walletType]);
+
   const profileName = useMemo(
     () => getProfileDisplayName(normalizedProfile) || 'Unnamed',
     [normalizedProfile]
@@ -822,7 +835,6 @@ export function Profile() {
     username: string;
     displayName: string;
     description: string;
-    audiusHandle?: string;
     thumbnail?: File | null;
     banner?: File | null;
     thumbnailValue?: string | null;
@@ -834,7 +846,7 @@ export function Profile() {
     setCreating(true);
     setError(null);
     try {
-      profileLog('[profile] create start', { address: connectedAddress, audiusHandle: form.audiusHandle });
+      profileLog('[profile] create start', { address: connectedAddress });
       const args: any = {
         username: form.username.trim(),
         displayName: form.displayName.trim(),
@@ -851,7 +863,6 @@ export function Profile() {
         username: args.username,
         displayName: args.displayName,
         description: args.description,
-        audiusHandle: form.audiusHandle,
         thumbnail: args.thumbnail || null,
         banner: args.banner || null,
       });
@@ -954,7 +965,6 @@ export function Profile() {
     username: string;
     displayName: string;
     description: string;
-    audiusHandle?: string;
     thumbnail?: File | null;
     banner?: File | null;
     thumbnailValue?: string | null;
@@ -987,16 +997,6 @@ export function Profile() {
       }
 
       await writableLibs.updateProfile(args, normalizedProfile.id);
-      const nextAudiusHandle = form.audiusHandle?.trim() || '';
-      const currentAudiusHandle = String(normalizedProfile?.audiusHandle || '').trim();
-      if (writableLibs.updateZone && nextAudiusHandle !== currentAudiusHandle) {
-        await writableLibs.updateZone(
-          {
-            AudiusHandle: nextAudiusHandle,
-          },
-          normalizedProfile.id
-        );
-      }
       const optimistic = {
         ...normalizedProfile,
         username: form.username.trim(),
@@ -1010,7 +1010,6 @@ export function Profile() {
         bannerTxId: form.banner
           ? null
           : (normalizedProfile as any)?.bannerTxId || normalizedProfile?.banner || normalizedProfile?.Banner || null,
-        audiusHandle: form.audiusHandle?.trim() || '',
       };
       setProfile(optimistic);
       const fresh =
@@ -1272,15 +1271,6 @@ export function Profile() {
       <section className={styles.section + ' ' + styles.sectionTight}>
         <div className={styles.sectionHeader}>
           <h2 className={styles.sectionTitle}>Permaweb profile</h2>
-          {walletType === 'arweave' && isOwn && (
-            <button
-              type="button"
-              className={styles.primaryBtn}
-              onClick={() => (normalizedProfile?.id ? setEditOpen(true) : setCreateOpen(true))}
-            >
-              {normalizedProfile?.id ? 'Edit profile' : 'Create profile'}
-            </button>
-          )}
         </div>
 
         {walletType !== 'arweave' ? (
@@ -1297,6 +1287,15 @@ export function Profile() {
               <p className={styles.subtext}>{profileBio || 'No description yet.'}</p>
             </div>
             <div className={styles.profileMeta}>
+              {walletType === 'arweave' && isOwn && (
+                <button
+                  type="button"
+                  className={styles.primaryBtn}
+                  onClick={() => setEditOpen(true)}
+                >
+                  Edit profile
+                </button>
+              )}
               <span className={styles.mono}>Profile ID</span>
               <span className={styles.monoValue}>
                 {normalizedProfile?.id ? `${String(normalizedProfile.id).slice(0, 12)}…` : 'Resolving…'}
@@ -1304,9 +1303,22 @@ export function Profile() {
             </div>
           </div>
         ) : (
-          <p className={styles.subtext}>
-            No permaweb profile found for this wallet yet. Create one to make your identity permanent and creator-first.
-          </p>
+          <>
+            <p className={styles.subtext}>
+              No permaweb profile found for this wallet yet. Create one to make your identity permanent and creator-first.
+            </p>
+            {walletType === 'arweave' && isOwn && (
+              <div className={styles.emptyProfileActions}>
+                <button
+                  type="button"
+                  className={styles.primaryBtn}
+                  onClick={() => setCreateOpen(true)}
+                >
+                  Create profile
+                </button>
+              </div>
+            )}
+          </>
         )}
       </section>
 
@@ -1692,7 +1704,6 @@ export function Profile() {
         <CreateProfileModal
           creating={creating}
           onClose={() => setCreateOpen(false)}
-          initialAudiusHandle={audiusProfile?.handle ?? audiusUser?.handle}
           onCreate={handleCreateProfile}
         />
       )}
@@ -1709,7 +1720,6 @@ export function Profile() {
           initialBannerUrl={bannerSource}
           initialThumbnailValue={(normalizedProfile as any)?.thumbnailTxId || normalizedProfile?.thumbnail || normalizedProfile?.Thumbnail || null}
           initialBannerValue={(normalizedProfile as any)?.bannerTxId || normalizedProfile?.banner || normalizedProfile?.Banner || null}
-          initialAudiusHandle={normalizedProfile?.audiusHandle || audiusProfile?.handle || audiusUser?.handle}
           onCreate={handleEditProfile}
         />
       )}

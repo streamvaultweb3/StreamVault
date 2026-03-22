@@ -5,7 +5,6 @@ export function CreateProfileModal(props: {
   mode?: 'create' | 'edit';
   creating: boolean;
   onClose: () => void;
-  initialAudiusHandle?: string | null;
   initialUsername?: string;
   initialDisplayName?: string;
   initialDescription?: string;
@@ -17,7 +16,6 @@ export function CreateProfileModal(props: {
     username: string;
     displayName: string;
     description: string;
-    audiusHandle?: string;
     thumbnail?: File | null;
     banner?: File | null;
     thumbnailValue?: string | null;
@@ -30,7 +28,6 @@ export function CreateProfileModal(props: {
   const [username, setUsername] = useState(props.initialUsername || '');
   const [displayName, setDisplayName] = useState(props.initialDisplayName || '');
   const [description, setDescription] = useState(props.initialDescription || '');
-  const [audiusHandle, setAudiusHandle] = useState(props.initialAudiusHandle || '');
   const [thumbnail, setThumbnail] = useState<File | null>(null);
   const [banner, setBanner] = useState<File | null>(null);
   const [removeThumbnail, setRemoveThumbnail] = useState(false);
@@ -118,15 +115,6 @@ export function CreateProfileModal(props: {
             Bio
             <textarea className={styles.textarea} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Creator-first. Permanent by design." />
           </label>
-          <label className={styles.label}>
-            Audius handle (optional)
-            <input
-              className={styles.input}
-              value={audiusHandle}
-              onChange={(e) => setAudiusHandle(e.target.value)}
-              placeholder="@artist"
-            />
-          </label>
           <div className={styles.fileRow}>
             <label className={styles.file}>
               Avatar
@@ -166,7 +154,6 @@ export function CreateProfileModal(props: {
                 username,
                 displayName,
                 description,
-                audiusHandle: audiusHandle.trim() || undefined,
                 thumbnail,
                 banner,
                 thumbnailValue: !removeThumbnail && !thumbnail ? props.initialThumbnailValue || null : null,

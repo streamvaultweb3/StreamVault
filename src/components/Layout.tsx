@@ -469,6 +469,20 @@ export function Layout({ children }: { children: React.ReactNode }) {
       >
         Open profile
       </Link>
+      {walletType === 'arweave' && normalizedProfile?.id && (
+        <Link
+          to={profileHref}
+          className={styles.walletMenuAction}
+          onClick={() => {
+            setShowWalletMenu(false);
+            if (typeof window !== 'undefined') {
+              window.dispatchEvent(new CustomEvent('streamvault:open-edit-profile'));
+            }
+          }}
+        >
+          Edit profile
+        </Link>
+      )}
       <button
         type="button"
         className={styles.walletMenuAction}

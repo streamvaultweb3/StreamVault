@@ -145,7 +145,6 @@ export function Home() {
     username: string;
     displayName: string;
     description: string;
-    audiusHandle?: string;
     thumbnail?: File | null;
     banner?: File | null;
     thumbnailValue?: string | null;
@@ -157,7 +156,7 @@ export function Home() {
     setCreating(true);
     setCreateError(null);
     try {
-      console.info('[profile] create start', { address, audiusHandle: form.audiusHandle });
+      console.info('[profile] create start', { address });
       const args: any = {
         username: form.username.trim(),
         displayName: form.displayName.trim(),
@@ -173,7 +172,6 @@ export function Home() {
         username: args.username,
         displayName: args.displayName,
         description: args.description,
-        audiusHandle: form.audiusHandle,
         thumbnail: args.thumbnail || null,
         banner: args.banner || null,
       });
@@ -376,7 +374,6 @@ export function Home() {
         <CreateProfileModal
           creating={creating}
           onClose={() => setCreateOpen(false)}
-          initialAudiusHandle={audiusUser?.handle}
           onCreate={handleCreateProfile}
         />
       )}
