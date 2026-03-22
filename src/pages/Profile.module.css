@@ -10,6 +10,14 @@
   margin-bottom: 24px;
 }
 
+.headerContent {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex: 1;
+}
+
 .bannerWrap {
   width: 100%;
   height: 180px;
@@ -120,18 +128,6 @@
   font-weight: var(--font-semibold);
   color: var(--text-primary);
   margin-bottom: 4px;
-}
-
-.profileMeta {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 8px;
-  min-width: 140px;
-}
-
-.emptyProfileActions {
-  margin-top: 14px;
 }
 
 .audiusMiniWrap {

@@ -98,6 +98,23 @@ function fileToDataURL(file: File): Promise<string> {
   });
 }
 
+async function resolveProfileMediaValue(
+  libs: any,
+  opts: {
+    file?: File | null;
+    keepValue?: string | null;
+    remove?: boolean;
+  }
+): Promise<string> {
+  if (opts.remove) return 'None';
+  if (opts.file) {
+    const dataUrl = await fileToDataURL(opts.file);
+    return await libs.resolveTransaction(dataUrl);
+  }
+  if (opts.keepValue) return opts.keepValue;
+  return 'None';
+}
+
 export function Profile() {
   const navigate = useNavigate();
   const profileDebug = import.meta.env.DEV && String(import.meta.env.VITE_DEBUG_PROFILE || '') === '1';
@@ -972,44 +989,51 @@ export function Profile() {
     removeThumbnail?: boolean;
     removeBanner?: boolean;
   }) => {
-    if (!libs?.updateProfile || !normalizedProfile?.id || walletType !== 'arweave') return;
+    if (!normalizedProfile?.id || walletType !== 'arweave') return;
     setCreating(true);
     setError(null);
     try {
       const writableLibs = await getWritableLibs();
-      if (!writableLibs) {
+      if (!writableLibs?.updateZone || !writableLibs?.resolveTransaction) {
         throw new Error('Arweave writable profile client is not ready.');
       }
-      const args: any = {
-        username: form.username.trim(),
-        displayName: form.displayName.trim(),
-        description: form.description.trim(),
-      };
-      if (form.thumbnail) {
-        args.thumbnail = await fileToDataURL(form.thumbnail);
-      } else if (!form.removeThumbnail && form.thumbnailValue) {
-        args.thumbnail = form.thumbnailValue;
-      }
-      if (form.banner) {
-        args.banner = await fileToDataURL(form.banner);
-      } else if (!form.removeBanner && form.bannerValue) {
-        args.banner = form.bannerValue;
-      }
-
-      await writableLibs.updateProfile(args, normalizedProfile.id);
+      const nextThumbnail = await resolveProfileMediaValue(writableLibs, {
+        file: form.thumbnail,
+        keepValue: form.removeThumbnail ? null : form.thumbnailValue || null,
+        remove: form.removeThumbnail,
+      });
+      const nextBanner = await resolveProfileMediaValue(writableLibs, {
+        file: form.banner,
+        keepValue: form.removeBanner ? null : form.bannerValue || null,
+        remove: form.removeBanner,
+      });
+      await writableLibs.updateZone(
+        {
+          Username: form.username.trim(),
+          DisplayName: form.displayName.trim(),
+          Description: form.description.trim(),
+          Thumbnail: nextThumbnail,
+          Banner: nextBanner,
+        },
+        normalizedProfile.id
+      );
       const optimistic = {
         ...normalizedProfile,
         username: form.username.trim(),
         displayName: form.displayName.trim(),
         description: form.description.trim(),
-        thumbnail: args.thumbnail || normalizedProfile?.thumbnail || normalizedProfile?.Thumbnail || null,
-        banner: args.banner || normalizedProfile?.banner || normalizedProfile?.Banner || null,
-        thumbnailTxId: form.thumbnail
+        thumbnail: form.removeThumbnail
           ? null
-          : (normalizedProfile as any)?.thumbnailTxId || normalizedProfile?.thumbnail || normalizedProfile?.Thumbnail || null,
-        bannerTxId: form.banner
+          : form.thumbnail
+            ? await fileToDataURL(form.thumbnail)
+            : (normalizedProfile as any)?.thumbnailTxId || normalizedProfile?.thumbnail || normalizedProfile?.Thumbnail || null,
+        banner: form.removeBanner
           ? null
-          : (normalizedProfile as any)?.bannerTxId || normalizedProfile?.banner || normalizedProfile?.Banner || null,
+          : form.banner
+            ? await fileToDataURL(form.banner)
+            : (normalizedProfile as any)?.bannerTxId || normalizedProfile?.banner || normalizedProfile?.Banner || null,
+        thumbnailTxId: nextThumbnail === 'None' ? null : nextThumbnail,
+        bannerTxId: nextBanner === 'None' ? null : nextBanner,
       };
       setProfile(optimistic);
       const fresh =
@@ -1050,16 +1074,37 @@ export function Profile() {
         ) : (
           <div className={styles.avatarPlaceholder} />
         )}
-        <div>
-          <h1 className={styles.title}>
-            {hasIdentity ? profileName : isOwn ? 'Your profile' : 'Creator profile'}
-          </h1>
-          {profileHandle && <p className={styles.subtext}>@{profileHandle}</p>}
-          {profileBio && <p className={styles.subtext}>{profileBio}</p>}
-          <p className={styles.address}>{resolvedAddress?.slice(0, 8)}…{resolvedAddress?.slice(-8)}</p>
-          {walletType && <span className={styles.walletType}>{walletType}</span>}
+        <div className={styles.headerContent}>
+          <div>
+            <h1 className={styles.title}>
+              {hasIdentity ? profileName : isOwn ? 'Your profile' : 'Creator profile'}
+            </h1>
+            {profileHandle && <p className={styles.subtext}>@{profileHandle}</p>}
+            {profileBio && <p className={styles.subtext}>{profileBio}</p>}
+            <p className={styles.address}>{resolvedAddress?.slice(0, 8)}…{resolvedAddress?.slice(-8)}</p>
+            {walletType && <span className={styles.walletType}>{walletType}</span>}
+          </div>
+          {walletType === 'arweave' && isOwn && (
+            <button
+              type="button"
+              className={styles.primaryBtn}
+              onClick={() => (normalizedProfile?.id ? setEditOpen(true) : setCreateOpen(true))}
+            >
+              {normalizedProfile?.id ? 'Edit profile' : 'Create profile'}
+            </button>
+          )}
         </div>
       </header>
+      {loading && (
+        <p className={styles.subtext} style={{ marginBottom: '16px' }}>
+          Loading profile…
+        </p>
+      )}
+      {error && (
+        <p className={styles.error} style={{ marginBottom: '16px' }}>
+          {error}
+        </p>
+      )}
       {(audiusProfile || (isOwn && audiusUser)) && (
         <section className={styles.section}>
           <div className={styles.profileCard}>
@@ -1266,60 +1311,6 @@ export function Profile() {
         <a href="#/creator-tools" className={styles.link}>
           Creator tools &amp; full steps →
         </a>
-      </section>
-
-      <section className={styles.section + ' ' + styles.sectionTight}>
-        <div className={styles.sectionHeader}>
-          <h2 className={styles.sectionTitle}>Permaweb profile</h2>
-        </div>
-
-        {walletType !== 'arweave' ? (
-          <p className={styles.subtext}>Connect <strong>Wander</strong> to create and manage your permaweb profile.</p>
-        ) : loading ? (
-          <LogoSpinner />
-        ) : error ? (
-          <p className={styles.error}>{error}</p>
-        ) : normalizedProfile?.id || hasIdentity ? (
-          <div className={styles.profileCard}>
-            <div>
-              <p className={styles.profileName}>{profileName}</p>
-              {profileHandle && <p className={styles.subtext}>@{profileHandle}</p>}
-              <p className={styles.subtext}>{profileBio || 'No description yet.'}</p>
-            </div>
-            <div className={styles.profileMeta}>
-              {walletType === 'arweave' && isOwn && (
-                <button
-                  type="button"
-                  className={styles.primaryBtn}
-                  onClick={() => setEditOpen(true)}
-                >
-                  Edit profile
-                </button>
-              )}
-              <span className={styles.mono}>Profile ID</span>
-              <span className={styles.monoValue}>
-                {normalizedProfile?.id ? `${String(normalizedProfile.id).slice(0, 12)}…` : 'Resolving…'}
-              </span>
-            </div>
-          </div>
-        ) : (
-          <>
-            <p className={styles.subtext}>
-              No permaweb profile found for this wallet yet. Create one to make your identity permanent and creator-first.
-            </p>
-            {walletType === 'arweave' && isOwn && (
-              <div className={styles.emptyProfileActions}>
-                <button
-                  type="button"
-                  className={styles.primaryBtn}
-                  onClick={() => setCreateOpen(true)}
-                >
-                  Create profile
-                </button>
-              </div>
-            )}
-          </>
-        )}
       </section>
 
       {normalizedProfile?.id && aoTokens.length > 0 && (
