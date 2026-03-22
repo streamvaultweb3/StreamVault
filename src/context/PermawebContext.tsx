@@ -18,6 +18,11 @@ const PermawebContext = createContext<PermawebContextValue | null>(null);
 const DEFAULT_MAINNET_AO_URL = 'https://push.forward.computer';
 const DEFAULT_MAINNET_AO_AUTHORITY = 'fcoN_xJeisVsPXA-trzVAuIiqO3ydLQxM-L4XbrQKzY';
 const DEFAULT_MAINNET_AO_SCHEDULER = 'n_XZJhUnmldNFo4dhajoPZWhBXuJk-OcQr5JQ49c4Zo';
+const DEFAULT_ARWEAVE_GATEWAY = {
+  host: 'arweave.net',
+  port: 443,
+  protocol: 'https',
+} as const;
 
 function toGatewayHost(input: string | undefined): string {
   const fallback = 'https://ao-search-gateway.goldsky.com';
@@ -82,7 +87,7 @@ export function PermawebProvider({ children }: { children: React.ReactNode }) {
 
     return Permaweb.init({
       ao,
-      arweave: Arweave.init({}),
+      arweave: Arweave.init(DEFAULT_ARWEAVE_GATEWAY),
       gateway: profileGateway,
       node: {
         url: aoUrl,
@@ -157,7 +162,7 @@ export function PermawebProvider({ children }: { children: React.ReactNode }) {
           });
       const baseDeps = {
         ao,
-        arweave: Arweave.init({}),
+        arweave: Arweave.init(DEFAULT_ARWEAVE_GATEWAY),
         gateway: profileGateway,
         node: {
           url: aoUrl,
