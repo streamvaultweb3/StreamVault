@@ -59,6 +59,8 @@ export default defineConfig({
   resolve: {
     alias: [
       { find: '@', replacement: '/src' },
+      { find: 'rpc-websockets', replacement: '/src/shims/rpc-websockets.js' },
+      { find: 'rpc-websockets/dist/index.browser.cjs', replacement: '/src/shims/rpc-websockets.js' },
     ],
   },
 });

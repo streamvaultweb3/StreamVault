@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import type { Track } from '../context/PlayerContext';
 import { usePlayer } from '../context/PlayerContext';
@@ -8,9 +9,11 @@ interface TrackCardProps {
   onPublishClick?: () => void;
   /** If set, use this for the artist link (e.g. /profile/address for vault tracks). */
   artistHref?: string;
+  footerContent?: ReactNode;
+  showPermanentBadge?: boolean;
 }
 
-export function TrackCard({ track, onPublishClick, artistHref }: TrackCardProps) {
+export function TrackCard({ track, onPublishClick, artistHref, footerContent, showPermanentBadge = true }: TrackCardProps) {
   const { play, pause, currentTrack, isPlaying } = usePlayer();
   const isCurrent = currentTrack?.id === track.id;
   const artistTo = artistHref ?? `/artist/${track.artistId}`;
@@ -42,14 +45,15 @@ export function TrackCard({ track, onPublishClick, artistHref }: TrackCardProps)
           {track.artist}
         </Link>
         <div className={styles.footer}>
-          {track.isPermanent && (
-            <span className={styles.perma}>Permanent</span>
+          {showPermanentBadge && track.isPermanent && (
+            <span className={styles.perma}>On Arweave</span>
           )}
           {onPublishClick && (
             <button type="button" className={styles.publishBtn} onClick={onPublishClick}>
               Publish to Arweave
             </button>
           )}
+          {footerContent}
         </div>
       </div>
     </div>

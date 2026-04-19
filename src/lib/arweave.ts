@@ -42,6 +42,7 @@ export interface PublishResult {
   permawebUrl?: string;
   arioUrl?: string;
   confirmed?: boolean;
+  gatewayReady?: boolean;
   error?: string;
 }
 
