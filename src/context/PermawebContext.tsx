@@ -15,7 +15,8 @@ interface PermawebContextValue {
 }
 
 const PermawebContext = createContext<PermawebContextValue | null>(null);
-const DEFAULT_MAINNET_AO_URL = 'https://push.forward.computer';
+/** Same HB base as `@permaweb/aoconnect` mainnet default (`tee-6.forward.computer`). */
+const DEFAULT_MAINNET_AO_URL = 'https://tee-6.forward.computer';
 const DEFAULT_MAINNET_AO_AUTHORITY = 'fcoN_xJeisVsPXA-trzVAuIiqO3ydLQxM-L4XbrQKzY';
 const DEFAULT_MAINNET_AO_SCHEDULER = 'n_XZJhUnmldNFo4dhajoPZWhBXuJk-OcQr5JQ49c4Zo';
 const DEFAULT_ARWEAVE_GATEWAY = {
@@ -122,7 +123,7 @@ export function PermawebProvider({ children }: { children: React.ReactNode }) {
       const injectedWallet = (typeof window !== 'undefined' && (window as any).arweaveWallet) || null;
       const signerWallet = injectedWallet || (hasWalletKitApi ? arweaveApi : null);
       const aoMode = ((import.meta.env.VITE_AO_MODE as string | undefined) || 'mainnet').toLowerCase();
-      const muUrl = cleanEnv(import.meta.env.VITE_AO_MU_URL as string | undefined) || 'https://push.forward.computer';
+      const muUrl = cleanEnv(import.meta.env.VITE_AO_MU_URL as string | undefined) || DEFAULT_MAINNET_AO_URL;
       const cuUrl = cleanEnv(import.meta.env.VITE_AO_CU_URL as string | undefined) || 'https://forward.computer';
       const gatewayUrl = cleanEnv(import.meta.env.VITE_AO_GATEWAY_URL as string | undefined) || 'https://arweave.net';
       const gqlUrlRaw =

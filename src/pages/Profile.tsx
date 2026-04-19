@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
 import { useWallet } from '../context/WalletContext';
 import { usePermaweb } from '../context/PermawebContext';
 import { useAudiusAuth } from '../context/AudiusAuthContext';
@@ -87,6 +87,12 @@ function inferProfileWalletAddress(profile: any, fallback?: string | null): stri
   return null;
 }
 
+/** Arweave wallet + AO process ids are 43-char base64url (includes `_` and `-`). */
+function isLikelyArweaveAddressRef(ref: string | undefined): boolean {
+  if (!ref || ref.length !== 43) return false;
+  return /^[A-Za-z0-9_-]+$/.test(ref);
+}
+
 function fileToDataURL(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -119,6 +125,7 @@ export function Profile() {
     if (profileDebug) console.info(...args);
   };
   const { address: routeProfileRef } = useParams<{ address: string }>();
+  const navigate = useNavigate();
   const { address: connectedAddress, walletType } = useWallet();
   const { audiusUser, login, logout, apiKeyConfigured, isLoggingIn, authError: audiusAuthError } = useAudiusAuth();
   const arweaveApi = useApi();
@@ -333,19 +340,29 @@ export function Profile() {
           const byId = await getProfileByIdSafe(libs, routeProfileRef);
           if (byId?.id) p = byId;
         }
-        const looksLikeWalletAddress =
-          !routeProfileRef.includes('_') &&
-          !routeProfileRef.includes('-') &&
-          routeProfileRef.length === 43;
-        if (!p?.id && looksLikeWalletAddress) {
-          p = await getSelectedOrLatestProfileByWallet(libs, routeProfileRef);
+        if (!p?.id && isLikelyArweaveAddressRef(routeProfileRef)) {
+          // Route may be wallet or a process id: by-id was tried above; if still empty, resolve via GraphQL by owner.
+          p = await getSelectedOrLatestProfileByWallet(libs, routeProfileRef, { useOverride: true });
         }
         profileLog('[profile] data', p);
         profileLog('[profile] fetch result', { hasProfile: Boolean(p?.id) });
         if (!cancelled) {
           const next = p?.id ? p : profileRef.current?.id ? profileRef.current : { id: null };
           setProfile(next);
-          if (next?.id) PROFILE_CACHE.set(routeProfileRef, next);
+          if (next?.id) {
+            PROFILE_CACHE.set(routeProfileRef, next);
+            PROFILE_CACHE.set(String(next.id), next);
+          }
+          if (
+            next?.id &&
+            walletType === 'arweave' &&
+            connectedAddress &&
+            routeProfileRef &&
+            routeProfileRef.toLowerCase() === connectedAddress.toLowerCase() &&
+            String(next.id) !== routeProfileRef
+          ) {
+            navigate(`/profile/${String(next.id)}`, { replace: true });
+          }
           const walletForSnapshot = inferProfileWalletAddress(next, resolvedAddress);
           if (walletForSnapshot && typeof window !== 'undefined') {
             try {
@@ -370,7 +387,7 @@ export function Profile() {
     return () => {
       cancelled = true;
     };
-  }, [isReady, libs, routeProfileRef, connectedAddress, resolvedAddress]);
+  }, [isReady, libs, routeProfileRef, connectedAddress, resolvedAddress, walletType, navigate]);
 
   useEffect(() => {
     let cancelled = false;
