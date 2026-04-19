@@ -44,6 +44,11 @@ export function PermawebProvider({ children }: { children: React.ReactNode }) {
   const arweaveApi = useApi();
   const hasWalletKitApi = Boolean(arweaveApi && (arweaveApi as any).getActiveAddress);
   const aoDebug = import.meta.env.DEV && String(import.meta.env.VITE_DEBUG_AO || '') === '1';
+  const permaDebug =
+    import.meta.env.DEV && String(import.meta.env.VITE_DEBUG_PERMAWEB || import.meta.env.VITE_DEBUG_PROFILE || '') === '1';
+  const permaLog = (...args: unknown[]) => {
+    if (permaDebug) console.info('[perma]', ...args);
+  };
   const [libs, setLibs] = useState<ReturnType<typeof Permaweb.init> | null>(null);
   const [isReady, setIsReady] = useState(false);
   const [walletAddress, setWalletAddress] = useState<string | null>(null);
@@ -113,6 +118,7 @@ export function PermawebProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      permaLog('PermawebProvider init effect', { walletType, address: address?.slice(0, 8), hasWalletKitApi });
       const injectedWallet = (typeof window !== 'undefined' && (window as any).arweaveWallet) || null;
       const signerWallet = injectedWallet || (hasWalletKitApi ? arweaveApi : null);
       const aoMode = ((import.meta.env.VITE_AO_MODE as string | undefined) || 'mainnet').toLowerCase();
@@ -173,6 +179,7 @@ export function PermawebProvider({ children }: { children: React.ReactNode }) {
 
       if (!signerWallet) {
         if (cancelled) return;
+        permaLog('init Permaweb without signer (read-only gateway client)');
         setLibs(Permaweb.init(baseDeps));
         setWalletAddress(null);
         setIsReady(true);
@@ -187,9 +194,11 @@ export function PermawebProvider({ children }: { children: React.ReactNode }) {
         const deps = useSigner
           ? { ...baseDeps, signer: createDataItemSigner(signerWallet) }
           : baseDeps;
+        permaLog('init Permaweb', { useSigner, addr: addr ? String(addr).slice(0, 12) : null });
         setLibs(Permaweb.init(deps));
-      } catch {
+      } catch (e) {
         if (cancelled) return;
+        permaLog('Permaweb init with signer failed; falling back to read-only client', e);
         setLibs(Permaweb.init(baseDeps));
         setWalletAddress(null);
       } finally {

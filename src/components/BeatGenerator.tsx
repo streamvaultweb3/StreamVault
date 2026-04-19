@@ -7,6 +7,7 @@ import { useNavigate } from 'react-router-dom';
 import { useWallet } from '../context/WalletContext';
 import { usePermaweb } from '../context/PermawebContext';
 import { useGeneratedAudio } from '../context/GeneratedAudioContext';
+import { arweaveTxDataUrl } from '../lib/arweaveDataGateway';
 import { getSelectedOrLatestProfileByWallet } from '../lib/permaProfile';
 import styles from './BeatGenerator.module.css';
 
@@ -80,15 +81,26 @@ export function BeatGenerator() {
     getSelectedOrLatestProfileByWallet(libs, address)
       .then((profile: any) => {
         if (cancelled) return;
-        const raw = profile?.samples || profile?.Samples || [];
-        const list = Array.isArray(raw) ? raw : [];
-        const next: ClipSource[] = list
+        const raw = [
+          ...(Array.isArray(profile?.arweaveTracks) ? profile.arweaveTracks : []),
+          ...(Array.isArray(profile?.ArweaveTracks) ? profile.ArweaveTracks : []),
+          ...(Array.isArray(profile?.samples) ? profile.samples : []),
+          ...(Array.isArray(profile?.Samples) ? profile.Samples : []),
+        ];
+        const list = raw;
+        const mapped: ClipSource[] = list
           .map((s: any, i: number) => ({
             id: s.txId || `clip-${i}`,
             title: s.title || `Clip ${i + 1}`,
-            url: s.permawebUrl || (s.txId ? `https://arweave.net/${s.txId}` : undefined),
+            url: s.permawebUrl || (s.txId ? arweaveTxDataUrl(s.txId) : undefined),
           }))
           .filter((c: ClipSource) => c.url);
+        const seen = new Set<string>();
+        const next = mapped.filter((c) => {
+          if (seen.has(c.id)) return false;
+          seen.add(c.id);
+          return true;
+        });
         setClips(next);
       })
       .catch(() => {

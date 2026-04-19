@@ -151,6 +151,59 @@ export function getStreamUrl(track: AudiusTrack): string {
   return `${AUDIUS_API}/tracks/${track.id}/stream?app_name=${encodeURIComponent(APP_NAME)}`;
 }
 
+/**
+ * Download the full Audius stream into a Blob (browser).
+ * Requires the stream URL to allow CORS from your app origin (Audius CDN usually does).
+ */
+export async function fetchAudiusStreamAsBlob(
+  streamUrl: string,
+  opts?: { maxBytes?: number }
+): Promise<Blob> {
+  const maxBytes = opts?.maxBytes ?? 10 * 1024 * 1024;
+  const res = await fetch(streamUrl, { mode: 'cors', credentials: 'omit' });
+  if (!res.ok) {
+    throw new Error(
+      `Could not fetch stream (${res.status}). Upload a file from disk, or try again later if the network blocked the request.`
+    );
+  }
+  const contentType = res.headers.get('content-type') || 'audio/mpeg';
+  if (!contentType.startsWith('audio/')) {
+    throw new Error('Stream URL did not return audio. Upload the file manually.');
+  }
+  const lenHeader = res.headers.get('content-length');
+  if (lenHeader) {
+    const total = Number(lenHeader);
+    if (Number.isFinite(total) && total > maxBytes) {
+      throw new Error(
+        `Track is larger than ${Math.round(maxBytes / (1024 * 1024))}MB. Enable Turbo for larger uploads or use a shorter file.`
+      );
+    }
+  }
+  const reader = res.body?.getReader();
+  if (!reader) {
+    const buf = await res.arrayBuffer();
+    if (buf.byteLength > maxBytes) {
+      throw new Error(`Track exceeds ${Math.round(maxBytes / (1024 * 1024))}MB limit.`);
+    }
+    return new Blob([buf], { type: contentType });
+  }
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value) {
+      if (received + value.byteLength > maxBytes) {
+        await reader.cancel().catch(() => {});
+        throw new Error(`Track exceeds ${Math.round(maxBytes / (1024 * 1024))}MB limit.`);
+      }
+      chunks.push(value);
+      received += value.byteLength;
+    }
+  }
+  return new Blob(chunks as BlobPart[], { type: contentType });
+}
+
 export function getArtworkUrl(track: AudiusTrack): string | null {
   return (
     track.artwork?.['480x480'] ||

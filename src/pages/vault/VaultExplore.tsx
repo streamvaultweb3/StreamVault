@@ -27,7 +27,7 @@ export function VaultExplore() {
         const aoRecords = await searchTracksOnAO({ tagName: tagName.trim(), tagValue: tagValue.trim() });
         aoTracks = aoRecordsToTracks(aoRecords);
       } else {
-        gqlTracks = await queryAudioTransactions({ limit: 50, type: 'all' });
+        gqlTracks = await queryAudioTransactions({ limit: 50 });
         const aoRecords = await searchTracksOnAO({});
         aoTracks = aoRecordsToTracks(aoRecords);
       }

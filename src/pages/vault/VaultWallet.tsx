@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react';
 import { useWallet } from '../../context/WalletContext';
+import { ARWEAVE_DATA_GATEWAY_BASE } from '../../lib/arweaveDataGateway';
 import styles from './Vault.module.css';
 
-const GATEWAY = 'https://arweave.net';
+const GATEWAY = ARWEAVE_DATA_GATEWAY_BASE;
 
 export function VaultWallet() {
   const { address, walletType } = useWallet();

@@ -5,7 +5,7 @@ import { setAnalyticsUserId, setUserProperties, trackEvent } from '../lib/analyt
 export type WalletType = 'arweave' | 'ethereum' | 'solana' | null;
 
 const STORAGE_KEY = 'streamvault:walletType';
-const ARWEAVE_PERMISSIONS = ['ACCESS_ADDRESS', 'ACCESS_PUBLIC_KEY', 'SIGN_TRANSACTION', 'DISPATCH'];
+const ARWEAVE_PERMISSIONS = ['ACCESS_ADDRESS', 'ACCESS_PUBLIC_KEY', 'SIGN_TRANSACTION', 'SIGNATURE', 'DISPATCH'];
 
 interface WalletContextValue {
   walletType: WalletType;

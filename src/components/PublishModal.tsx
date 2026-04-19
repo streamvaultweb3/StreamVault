@@ -1,17 +1,19 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { Track } from '../context/PlayerContext';
 import { usePermaweb } from '../context/PermawebContext';
 import { useWallet } from '../context/WalletContext';
 import { useGeneratedCover } from '../context/GeneratedCoverContext';
 import { useGeneratedAudio } from '../context/GeneratedAudioContext';
-import {
-  PublishTier,
-  type PublishResult,
-} from '../lib/arweave';
+import { type PublishResult } from '../lib/arweave';
 import { getSelectedOrLatestProfileByWallet } from '../lib/permaProfile';
-import { publishSampleToArweave, publishFullAsAtomicAsset, publishFullDirectToArweave, createFiatTopUpSession } from '../lib/publish';
+import { fetchAudiusStreamAsBlob } from '../lib/audius';
+import { arweaveTxMetaUrl } from '../lib/arweaveDataGateway';
+import { publishFullAsAtomicAsset, createFiatTopUpSession } from '../lib/publish';
+import { fetchTurboBalance, formatTurboCredits, type TurboBalance } from '../lib/turboCredits';
+import { fetchL1CostForBytes, fetchTurboCostForBytes, formatArFromWinston } from '../lib/uploadCosts';
+import { appendUploadLedger } from '../lib/uploadLedger';
 import type { UdlConfig, RoyaltySplit, UdlAiUse } from '../lib/udl';
-import { trackEvent } from '../lib/analytics';
+import { udlToSummary } from '../lib/uploadedTracks';
 import styles from './PublishModal.module.css';
 
 interface PublishModalProps {
@@ -25,24 +27,34 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
   const { address, walletType, connect, isConnecting } = useWallet();
   const { generatedCover, clearGeneratedCover } = useGeneratedCover();
   const { generatedAudio, clearGeneratedAudio } = useGeneratedAudio();
-  const [tier, setTier] = useState<PublishTier>(track ? 'sample' : 'full');
+  const isAudiusBackedTrack = Boolean(track?.streamUrl && !track?.isPermanent && !track?.permaTxId && !track?.assetId);
   const [status, setStatus] = useState<'idle' | 'uploading' | 'confirming' | 'done' | 'error'>('idle');
   const [result, setResult] = useState<PublishResult | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [sampleFile, setSampleFile] = useState<Blob | null>(null);
   const [fullFile, setFullFile] = useState<File | null>(null);
   const [coverFile, setCoverFile] = useState<File | null>(null);
   const [description, setDescription] = useState('');
   const [royaltiesBps, setRoyaltiesBps] = useState<number>(500);
-  const [fullPublishMode, setFullPublishMode] = useState<'direct' | 'atomic'>('direct');
-  const [useTurbo, setUseTurbo] = useState(false);
+  const [useTurbo, setUseTurbo] = useState(true);
   const [turboToken, setTurboToken] = useState<'arweave' | 'ethereum' | 'base-eth' | 'solana' | 'base-usdc' | 'base-ario' | 'polygon-usdc' | 'pol'>('arweave');
-  const [isAutoSample, setIsAutoSample] = useState(true);
+  const [showAdvancedUpload, setShowAdvancedUpload] = useState(false);
   const [copiedTxId, setCopiedTxId] = useState(false);
+  const [copiedAudioUrl, setCopiedAudioUrl] = useState(false);
   const [appendWarning, setAppendWarning] = useState<string | null>(null);
   const [fiatAmount, setFiatAmount] = useState<string>('10');
   const [isTopUpLoading, setIsTopUpLoading] = useState(false);
   const [showWalletChooser, setShowWalletChooser] = useState(false);
+  const [turboBalance, setTurboBalance] = useState<TurboBalance | null>(null);
+  const [turboBalanceLoading, setTurboBalanceLoading] = useState(false);
+  const [turboBalanceError, setTurboBalanceError] = useState<string | null>(null);
+  const [turboCostEstimate, setTurboCostEstimate] = useState<number | null>(null);
+  const [l1CostEstimate, setL1CostEstimate] = useState<number | null>(null);
+  const [costEstimateLoading, setCostEstimateLoading] = useState(false);
+  const [costEstimateError, setCostEstimateError] = useState<string | null>(null);
+  /** When publishing full tier from an Audius-backed track, download bytes from streamUrl (CORS permitting). */
+  const [useAudiusStreamForFull, setUseAudiusStreamForFull] = useState(isAudiusBackedTrack);
+  /** Upload signed data tx with UDL tags only; skip permaweb-libs createAtomicAsset (HyperBEAM / SU issues). */
+  const [skipAtomicAsset, setSkipAtomicAsset] = useState(false);
 
   // Simple UDL controls
   const [licenseUsePreset, setLicenseUsePreset] = useState<'stream' | 'stream-download' | 'stream-download-commercial'>('stream');
@@ -54,13 +66,87 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
   const [customTitle, setCustomTitle] = useState(track?.title || '');
   const [customArtist, setCustomArtist] = useState(track?.artist || '');
 
-  const SAMPLE_MAX_BYTES = 100 * 1024;
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!useTurbo || !address || walletType !== 'arweave') {
+        setTurboBalance(null);
+        setTurboBalanceError(null);
+        setTurboBalanceLoading(false);
+        return;
+      }
+      setTurboBalanceLoading(true);
+      setTurboBalanceError(null);
+      try {
+        const next = await fetchTurboBalance(address);
+        if (!cancelled) setTurboBalance(next);
+      } catch (e: any) {
+        if (!cancelled) {
+          setTurboBalance(null);
+          setTurboBalanceError(e?.message || 'Failed to load Turbo credits.');
+        }
+      } finally {
+        if (!cancelled) setTurboBalanceLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [address, useTurbo, walletType]);
+
+  const estimatedByteCount = fullFile?.size ?? generatedAudio?.size ?? null;
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!estimatedByteCount || estimatedByteCount <= 0) {
+        setTurboCostEstimate(null);
+        setL1CostEstimate(null);
+        setCostEstimateError(null);
+        setCostEstimateLoading(false);
+        return;
+      }
+      setCostEstimateLoading(true);
+      setCostEstimateError(null);
+      try {
+        const [turboWinc, l1Winston] = await Promise.all([
+          fetchTurboCostForBytes(estimatedByteCount),
+          fetchL1CostForBytes(estimatedByteCount),
+        ]);
+        if (!cancelled) {
+          setTurboCostEstimate(turboWinc);
+          setL1CostEstimate(l1Winston);
+        }
+      } catch (e: any) {
+        if (!cancelled) {
+          setTurboCostEstimate(null);
+          setL1CostEstimate(null);
+          setCostEstimateError(e?.message || 'Failed to estimate upload cost.');
+        }
+      } finally {
+        if (!cancelled) setCostEstimateLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [estimatedByteCount]);
 
   const handleCopyTxId = async (txId: string) => {
     try {
       await navigator.clipboard.writeText(txId);
       setCopiedTxId(true);
       window.setTimeout(() => setCopiedTxId(false), 1500);
+    } catch (e) {
+      console.warn('[publish] Clipboard copy failed', e);
+    }
+  };
+
+  const handleCopyAudioUrl = async (url: string) => {
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopiedAudioUrl(true);
+      window.setTimeout(() => setCopiedAudioUrl(false), 1500);
     } catch (e) {
       console.warn('[publish] Clipboard copy failed', e);
     }
@@ -77,35 +163,15 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
       return;
     }
     try {
-      trackEvent('turbo_top_up_attempt', {
-        amount_usd: amount,
-      });
       setIsTopUpLoading(true);
       setErrorMessage(null);
       const url = await createFiatTopUpSession({ amountUsd: amount, ownerAddress: address });
-      trackEvent('turbo_top_up_redirected', { amount_usd: amount });
       window.location.href = url;
     } catch (e: any) {
-      trackEvent('turbo_top_up_failed', {
-        reason: String(e?.message || 'top_up_error').slice(0, 200),
-      });
       setErrorMessage(e?.message || 'Failed to initialize Stripe checkout.');
     } finally {
       setIsTopUpLoading(false);
     }
-  };
-
-  const fetchSampleFromStream = async (streamUrl: string, maxBytes = SAMPLE_MAX_BYTES) => {
-    const res = await fetch(streamUrl, {
-      headers: { Range: `bytes=0-${maxBytes - 1}` },
-    });
-    if (!res.ok) throw new Error('Unable to fetch a sample from the stream.');
-    const contentType = res.headers.get('content-type') || 'audio/mpeg';
-    if (!contentType.startsWith('audio/')) {
-      throw new Error('Stream did not return audio data.');
-    }
-    const data = await res.arrayBuffer();
-    return new Blob([data.slice(0, maxBytes)], { type: contentType });
   };
 
   const buildUdlConfig = (): UdlConfig => {
@@ -165,187 +231,177 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
   };
 
   const handlePublish = async () => {
-    // #region agent log
-    fetch('http://127.0.0.1:7939/ingest/0b5e774a-21c9-48b0-b426-076405dcd7ec',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'935ac8'},body:JSON.stringify({sessionId:'935ac8',runId:'pre-fix',hypothesisId:'P1',location:'src/components/PublishModal.tsx:157',message:'handlePublish-start',data:{tier,walletType,hasAddress:Boolean(address),useTurbo,isAutoSample,hasSampleFile:Boolean(sampleFile),hasFullFile:Boolean(fullFile),audioFromGenerator:Boolean(generatedAudio)},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion agent log
     if (!address || !walletType || !libs) {
       // Show inline wallet chooser instead of a plain error
-      trackEvent('publish_blocked_wallet_required', {
-        tier,
-      });
       setShowWalletChooser(true);
       return;
     }
-    trackEvent('publish_attempt', {
-      tier,
-      wallet_type: walletType,
-      use_turbo: useTurbo,
-      turbo_token: useTurbo ? turboToken : 'none',
-      has_cover: Boolean(coverFile || generatedCover || track?.artwork),
-    });
     setStatus('uploading');
     setErrorMessage(null);
     setAppendWarning(null);
     try {
-      let res: PublishResult;
-      if (tier === 'sample') {
-        if (walletType !== 'arweave') {
+      let effectiveAudio: Blob | File | null =
+        fullFile || (generatedAudio ? new File([generatedAudio], 'generated-beat.wav', { type: 'audio/wav' }) : null);
+      if (!effectiveAudio && useAudiusStreamForFull && track?.streamUrl) {
+        try {
+          const maxBytes = useTurbo ? 50 * 1024 * 1024 : 10 * 1024 * 1024;
+          effectiveAudio = await fetchAudiusStreamAsBlob(track.streamUrl, { maxBytes });
+        } catch (e: any) {
           setStatus('error');
-          setErrorMessage('Connect Wander (Arweave) to publish samples permanently.');
-          return;
-        }
-        let sample = sampleFile;
-        if (!sample && isAutoSample && track?.streamUrl) {
-          sample = await fetchSampleFromStream(track.streamUrl);
-        }
-        if (!sample) {
-          setStatus('error');
-          setErrorMessage('Upload a short sound bite under 100KB or use auto-sample (if viewing a track).');
-          return;
-        }
-        if (sample.type && !sample.type.startsWith('audio/')) {
-          setStatus('error');
-          setErrorMessage('Sample must be an audio file.');
-          return;
-        }
-        if (sample.size > SAMPLE_MAX_BYTES) {
-          setStatus('error');
-          setErrorMessage('Sample must be under 100KB. Try exporting a smaller MP3/OPUS.');
-          return;
-        }
-        res = await publishSampleToArweave({
-          sample,
-          title: `${customTitle || 'Unknown Track'} (15s sample)`,
-          artist: customArtist || 'Unknown Artist',
-          durationSeconds: 15,
-        });
-      } else {
-        const effectiveAudio = fullFile || (generatedAudio ? new File([generatedAudio], 'generated-beat.wav', { type: 'audio/wav' }) : null);
-        if (!effectiveAudio) {
-          setStatus('error');
-          setErrorMessage('Choose an audio file to publish as an Atomic Asset, or generate a beat in Creator tools and use "Use in Publish".');
-          return;
-        }
-        if (useTurbo) {
-          const needWallet =
-            turboToken === 'arweave'
-              ? walletType === 'arweave'
-              : turboToken === 'solana'
-                ? walletType === 'solana'
-                : walletType === 'ethereum';
-          if (!needWallet) {
-            setStatus('error');
-            setErrorMessage('Connect the matching wallet for the selected Turbo payment option.');
-            return;
-          }
-        } else if (walletType !== 'arweave') {
-          setStatus('error');
-          setErrorMessage('Connect Wander (Arweave) for non-Turbo full uploads.');
-          return;
-        }
-        if (!useTurbo && effectiveAudio.size > 10 * 1024 * 1024) {
-          setStatus('error');
-          setErrorMessage('Full asset must be under ~10MB unless using Turbo.');
-          return;
-        }
-        const udlConfig = buildUdlConfig();
-        const splits = buildDefaultSplits();
-
-        if (fullPublishMode === 'direct') {
-          res = await publishFullDirectToArweave(
-            {
-              audio: effectiveAudio,
-              title: customTitle || 'Unknown Track',
-              artist: customArtist || 'Unknown Artist',
-              description: description.trim() || undefined,
-              artworkUrl: (coverFile || generatedCover) ? undefined : track?.artwork,
-              artworkFile: (coverFile || generatedCover) || undefined,
-              udl: udlConfig,
-              splits,
-              useTurbo,
-              turboPaymentToken: turboToken,
-            },
-            address
+          const message = String(e?.message || e || '').trim();
+          setErrorMessage(
+            message === 'Failed to fetch'
+              ? 'Could not download the full track from the Audius stream. This is usually a browser CORS/CDN issue before upload begins. Upload the audio file from disk instead, or retry later if the Audius stream becomes reachable.'
+              : message ||
+                  'Could not download the full track from the Audius stream (often CORS or size). Upload the audio file from disk instead.'
           );
-        } else {
-          res = await publishFullAsAtomicAsset(
-            {
-              audio: effectiveAudio,
-              title: customTitle || 'Unknown Track',
-              artist: customArtist || 'Unknown Artist',
-              description: description.trim() || undefined,
-              artworkUrl: (coverFile || generatedCover) ? undefined : track?.artwork,
-              artworkFile: (coverFile || generatedCover) || undefined,
-              royaltiesBps: Number.isFinite(royaltiesBps) ? royaltiesBps : undefined,
-              udl: udlConfig,
-              splits,
-              useTurbo,
-              turboPaymentToken: turboToken,
-            },
-            address,
-            { libs }
-          );
+          return;
         }
       }
-      if (res.success && tier === 'full') {
+      if (!effectiveAudio) {
+        setStatus('error');
+        setErrorMessage(
+          'Choose an audio file, enable “Use Audius stream as full audio” if this track is playing from Audius, or generate a beat in Creator tools and use “Use in Publish”.'
+        );
+        return;
+      }
+      if (useTurbo) {
+        const needWallet =
+          turboToken === 'arweave'
+            ? walletType === 'arweave'
+            : turboToken === 'solana'
+              ? walletType === 'solana'
+              : walletType === 'ethereum';
+        if (!needWallet) {
+          setStatus('error');
+          setErrorMessage('Connect the matching wallet for the selected Turbo payment option.');
+          return;
+        }
+      } else if (walletType !== 'arweave') {
+        setStatus('error');
+        setErrorMessage('Connect Wander (Arweave) for non-Turbo full uploads.');
+        return;
+      }
+      if (!useTurbo && effectiveAudio.size > 10 * 1024 * 1024) {
+        setStatus('error');
+        setErrorMessage('Full asset must be under ~10MB unless using Turbo.');
+        return;
+      }
+      const udlConfig = buildUdlConfig();
+      const splits = buildDefaultSplits();
+
+      const res: PublishResult = await publishFullAsAtomicAsset(
+        {
+          audio: effectiveAudio,
+          title: customTitle || 'Unknown Track',
+          artist: customArtist || 'Unknown Artist',
+          description: description.trim() || undefined,
+          artworkUrl: (coverFile || generatedCover) ? undefined : track?.artwork,
+          artworkFile: (coverFile || generatedCover) || undefined,
+          royaltiesBps: Number.isFinite(royaltiesBps) ? royaltiesBps : undefined,
+          udl: udlConfig,
+          splits,
+          useTurbo,
+          turboPaymentToken: turboToken,
+          skipAtomicAsset,
+          audiusTrackId: isAudiusBackedTrack ? track?.id : undefined,
+          fromAudiusStream: Boolean(useAudiusStreamForFull && track?.streamUrl),
+        },
+        address,
+        { libs }
+      );
+      if (res.success) {
         clearGeneratedCover();
         clearGeneratedAudio();
+        if (useTurbo && address && walletType === 'arweave') {
+          try {
+            const nextBalance = await fetchTurboBalance(address);
+            setTurboBalance(nextBalance);
+          } catch {
+            // ignore post-upload refresh failures
+          }
+          try {
+            window.dispatchEvent(new CustomEvent('streamvault:turbo-balance-refresh'));
+          } catch {
+            // ignore
+          }
+        }
       }
-      trackEvent(res.success ? 'publish_success' : 'publish_failed', {
-        tier,
-        wallet_type: walletType || 'unknown',
-        use_turbo: useTurbo,
-        tx_id_present: Boolean(res.txId),
-        error: res.error ? String(res.error).slice(0, 200) : undefined,
-      });
       setResult(res);
       setStatus(res.success ? 'done' : 'error');
       if (res.error) setErrorMessage(res.error);
       console.info('[publish] Result', res);
       if (res.success && res.txId && address) {
         try {
+          const entryBase = {
+            txId: res.txId,
+            title: customTitle || 'Unknown Track',
+            artist: customArtist || 'Unknown Artist',
+            permawebUrl: res.permawebUrl,
+            arioUrl: res.arioUrl,
+            confirmed: res.confirmed,
+            gatewayReady: res.gatewayReady,
+            assetId: res.assetId,
+            createdAt: new Date().toISOString(),
+            audiusTrackId: track?.streamUrl ? String(track.id) : undefined,
+            description: description.trim() || undefined,
+            artworkUrl:
+              typeof track?.artwork === 'string' && track.artwork.trim()
+                ? track.artwork
+                : undefined,
+            contentType: effectiveAudio.type || 'audio/mpeg',
+            udl: udlToSummary(udlConfig),
+            splits,
+          };
+          appendUploadLedger({
+            ...entryBase,
+            walletAddress: address,
+            tier: 'full',
+            dataTxOnly: skipAtomicAsset,
+          });
           if (walletType === 'arweave' && libs?.addToZone) {
             const profile = await getSelectedOrLatestProfileByWallet(libs, address);
             if (profile?.id) {
-              const zonePath = tier === 'full' ? 'Tracks[]' : 'Samples[]';
               await libs.addToZone(
                 {
-                  path: zonePath,
+                  path: 'ArweaveTracks[]',
                   data: {
-                    txId: res.txId,
-                    kind: tier === 'full' ? 'full-track' : 'sample',
-                    title: customTitle || 'Unknown Track',
-                    artist: customArtist || 'Unknown Artist',
-                    source: track ? 'audius' : 'streamvault',
-                    sourceTrackId: track?.id || null,
-                    sourceArtistId: track?.artistId || null,
-                    permawebUrl: res.permawebUrl,
-                    arioUrl: res.arioUrl,
-                    createdAt: new Date().toISOString(),
+                    ...entryBase,
                   },
                 },
                 profile.id
               );
+              try {
+                window.dispatchEvent(new CustomEvent('streamvault:profile-updated'));
+              } catch {
+                // ignore
+              }
             } else {
-              setAppendWarning('Create a permaweb profile to store this on-chain.');
+              setAppendWarning('Create a permaweb profile to list this on your permaweb profile on-chain.');
             }
           } else if (walletType === 'arweave') {
             setAppendWarning('Permaweb profile tools are not ready yet. Try again later.');
+          } else {
+            setAppendWarning(
+              'Upload recorded on this device. Connect Wander and open your profile to sync to your permaweb zone, or use “Add existing upload” with this tx id.'
+            );
           }
-          const key = `streamvault:${tier === 'full' ? 'tracks' : 'samples'}:${address.toLowerCase()}`;
-          const existing = JSON.parse(localStorage.getItem(key) || '[]') as Array<Record<string, any>>;
-          const entry = {
-            txId: res.txId,
-            kind: tier === 'full' ? 'full-track' : 'sample',
-            title: customTitle || 'Unknown Track',
-            artist: customArtist || 'Unknown Artist',
-            source: track ? 'audius' : 'streamvault',
-            sourceTrackId: track?.id || null,
-            permawebUrl: res.permawebUrl,
-            arioUrl: res.arioUrl,
-            createdAt: new Date().toISOString(),
-          };
-          localStorage.setItem(key, JSON.stringify([entry, ...existing].slice(0, 50)));
+          const legacyKey = `streamvault:samples:${address.toLowerCase()}`;
+          const tracksKey = `streamvault:myTracks:${address.toLowerCase()}`;
+          const existing = JSON.parse(localStorage.getItem(tracksKey) || '[]') as Array<Record<string, any>>;
+          const entry = { ...entryBase };
+          localStorage.setItem(tracksKey, JSON.stringify([entry, ...existing].slice(0, 50)));
+          try {
+            const legacy = JSON.parse(localStorage.getItem(legacyKey) || '[]') as Array<Record<string, any>>;
+            localStorage.setItem(legacyKey, JSON.stringify([entry, ...legacy].slice(0, 50)));
+          } catch {
+            // ignore legacy mirror failures
+          }
+          try {
+            window.dispatchEvent(new CustomEvent('streamvault:uploads-updated'));
+          } catch {
+            // ignore
+          }
         } catch (e) {
           console.warn('[publish] Failed to persist local record', e);
           setAppendWarning('Upload saved locally only. Create a permaweb profile to store it on-chain.');
@@ -354,12 +410,6 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
       if (res.success && onSuccess) onSuccess(res);
     } catch (e: any) {
       console.error('[publish] Publish failed', e);
-      trackEvent('publish_failed', {
-        tier,
-        wallet_type: walletType || 'unknown',
-        use_turbo: useTurbo,
-        reason: String(e?.message || 'publish_error').slice(0, 200),
-      });
       setResult({ success: false, error: e?.message || 'Publish failed' });
       setErrorMessage(e?.message || 'Publish failed');
       setStatus('error');
@@ -373,13 +423,9 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
           <h2>Publish to Arweave</h2>
           <button type="button" className={styles.close} onClick={onClose} aria-label="Close">×</button>
         </div>
-        <p className={styles.subtitle}>Creator-first: choose how to preserve this track permanently.</p>
+        <p className={styles.subtitle}>Upload the full track with Turbo-backed delivery, your license (UDL), and optional atomic asset.</p>
         {status === 'uploading' && (
-          <p className={styles.hint}>
-            {tier === 'sample'
-              ? 'Uploading sample to Arweave…'
-              : 'Uploading audio completely on-chain…'}
-          </p>
+          <p className={styles.hint}>Uploading full audio to Arweave…</p>
         )}
 
         <div className={styles.trackPreview}>
@@ -421,57 +467,123 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
           )}
         </div>
 
-        <div className={styles.tiers}>
-          {track && (
-            <label className={styles.tierCard + (tier === 'sample' ? ' ' + styles.tierActive : '')}>
-              <input type="radio" name="tier" checked={tier === 'sample'} onChange={() => setTier('sample')} />
-              <span className={styles.tierTitle}>Sample — Free</span>
-              <span className={styles.tierDesc}>15s preview · Under 100KB · Permanent link · Collectible in-app</span>
-            </label>
-          )}
-          <label className={styles.tierCard + (tier === 'full' ? ' ' + styles.tierActive : '')}>
-            <input type="radio" name="tier" checked={tier === 'full'} onChange={() => setTier('full')} />
-            <span className={styles.tierTitle}>Full — Permanent Audio</span>
-            <span className={styles.tierDesc}>Up to ~10MB · Metadata, artwork, royalties · Full quality audio</span>
-          </label>
-        </div>
-
         <div className={styles.form}>
-          {tier === 'sample' ? (
-            <>
-              <label className={styles.label}>
-                Sample sound bite (under 100KB)
+          <div className={styles.licenseBlock}>
+            <p className={styles.licenseTitle}>License & usage (UDL)</p>
+            <label className={styles.label}>
+              Usage
+              <select
+                className={styles.select}
+                value={licenseUsePreset}
+                onChange={(e) => setLicenseUsePreset(e.target.value as typeof licenseUsePreset)}
+              >
+                <option value="stream">Streaming only</option>
+                <option value="stream-download">Stream + personal download</option>
+                <option value="stream-download-commercial">Stream + download + commercial sync</option>
+              </select>
+            </label>
+            <label className={styles.label}>
+              AI use
+              <select
+                className={styles.select}
+                value={aiUse}
+                onChange={(e) => setAiUse(e.target.value as UdlAiUse)}
+              >
+                <option value="deny">No AI training or generation</option>
+                <option value="allow-train">Allow AI training only</option>
+                <option value="allow-generate">Allow training + generation</option>
+              </select>
+            </label>
+            <div className={styles.licenseRow}>
+              <label className={styles.label} style={{ flex: 1 }}>
+                License fee
                 <input
-                  className={styles.file}
-                  type="file"
-                  accept="audio/*"
-                  onChange={(e) => setSampleFile(e.target.files?.[0] || null)}
+                  className={styles.input}
+                  type="number"
+                  min={0}
+                  step={0.01}
+                  value={licenseFee}
+                  onChange={(e) => setLicenseFee(e.target.value)}
                 />
               </label>
-              {track?.streamUrl && (
-                <label className={styles.checkLabel}>
-                  <input
-                    type="checkbox"
-                    checked={isAutoSample}
-                    onChange={(e) => setIsAutoSample(e.target.checked)}
-                  />
-                  <span>Auto-sample from the track stream when available.</span>
-                </label>
-              )}
-              <p className={styles.hint}>
-                Tip: export a short MP3 clip to hit the free tier target.
-              </p>
-            </>
-          ) : (
-            <>
+              <label className={styles.label} style={{ flex: 1 }}>
+                Currency
+                <select
+                  className={styles.select}
+                  value={licenseCurrency}
+                  onChange={(e) => setLicenseCurrency(e.target.value)}
+                >
+                  <option value="U">$U (AO)</option>
+                  <option value="MATIC">MATIC (Polygon)</option>
+                  <option value="USDC.base">USDC (Base)</option>
+                  <option value="AR">AR (Arweave)</option>
+                </select>
+              </label>
+            </div>
+            <p className={styles.hint}>
+              Applied as Arweave tags (and atomic asset metadata when minting).
+            </p>
+          </div>
+          <>
               <label className={styles.label}>
-                Full audio file (up to ~10MB)
+                Full audio file (up to ~10MB without Turbo, larger with Turbo)
                 <input
                   className={styles.file}
                   type="file"
                   accept="audio/*"
                   onChange={(e) => setFullFile(e.target.files?.[0] || null)}
                 />
+              </label>
+              {(estimatedByteCount || costEstimateLoading || costEstimateError || turboCostEstimate !== null || l1CostEstimate !== null) && (
+                <div className={styles.turboBalanceBox}>
+                  <span className={styles.turboBalanceLabel}>Estimated upload cost</span>
+                  {estimatedByteCount ? (
+                    <span className={styles.hint} style={{ marginTop: 0 }}>
+                      Based on {(estimatedByteCount / (1024 * 1024)).toFixed(2)} MB of local audio data.
+                    </span>
+                  ) : (
+                    <span className={styles.hint} style={{ marginTop: 0 }}>
+                      Cost estimate appears after selecting a local file or generated audio. Remote Audius streams are estimated only after fetch.
+                    </span>
+                  )}
+                  {costEstimateLoading ? (
+                    <strong className={styles.turboBalanceValue}>Loading estimates…</strong>
+                  ) : (
+                    <>
+                      {turboCostEstimate !== null && (
+                        <strong className={styles.turboBalanceValue}>
+                          Turbo: {formatTurboCredits(turboCostEstimate)}
+                        </strong>
+                      )}
+                      {l1CostEstimate !== null && (
+                        <strong className={styles.turboBalanceValue}>
+                          Direct L1: {formatArFromWinston(l1CostEstimate)}
+                        </strong>
+                      )}
+                    </>
+                  )}
+                  {costEstimateError && <span className={styles.turboBalanceError}>{costEstimateError}</span>}
+                </div>
+              )}
+              {isAudiusBackedTrack && (
+                <label className={styles.checkLabel}>
+                  <input
+                    type="checkbox"
+                    checked={useAudiusStreamForFull}
+                    onChange={(e) => setUseAudiusStreamForFull(e.target.checked)}
+                  />
+                  <span>
+                    Use Audius stream as full audio (requires browser access to the stream URL; you must own the rights).
+                  </span>
+                </label>
+              )}
+              <label className={styles.checkLabel}>
+                <input
+                  type="checkbox"
+                  checked={skipAtomicAsset}
+                  onChange={(e) => setSkipAtomicAsset(e.target.checked)}
+                />
+                <span>Skip atomic asset — upload audio with UDL tags only (no permaweb-libs mint).</span>
               </label>
               {generatedAudio && !fullFile && (
                 <p className={styles.generatedCoverNote}>
@@ -525,113 +637,73 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
                   onChange={(e) => setRoyaltiesBps(Number(e.target.value))}
                 />
               </label>
-              <div className={styles.licenseBlock}>
-                <p className={styles.licenseTitle}>Publish mode</p>
-                <label className={styles.checkLabel}>
-                  <input
-                    type="radio"
-                    name="full-publish-mode"
-                    checked={fullPublishMode === 'direct'}
-                    onChange={() => setFullPublishMode('direct')}
-                  />
-                  <span>Direct Arweave upload with StreamVault music tags. Recommended for now.</span>
-                </label>
-                <label className={styles.checkLabel}>
-                  <input
-                    type="radio"
-                    name="full-publish-mode"
-                    checked={fullPublishMode === 'atomic'}
-                    onChange={() => setFullPublishMode('atomic')}
-                  />
-                  <span>Atomic Asset on AO mainnet. Experimental until the spawn path is stable.</span>
-                </label>
-              </div>
-              <div className={styles.licenseBlock}>
-                <p className={styles.licenseTitle}>License & usage (UDL)</p>
-                <label className={styles.label}>
-                  Usage
-                  <select
-                    className={styles.select}
-                    value={licenseUsePreset}
-                    onChange={(e) => setLicenseUsePreset(e.target.value as typeof licenseUsePreset)}
-                  >
-                    <option value="stream">Streaming only</option>
-                    <option value="stream-download">Stream + personal download</option>
-                    <option value="stream-download-commercial">Stream + download + commercial sync</option>
-                  </select>
-                </label>
-                <label className={styles.label}>
-                  AI use
-                  <select
-                    className={styles.select}
-                    value={aiUse}
-                    onChange={(e) => setAiUse(e.target.value as UdlAiUse)}
-                  >
-                    <option value="deny">No AI training or generation</option>
-                    <option value="allow-train">Allow AI training only</option>
-                    <option value="allow-generate">Allow training + generation</option>
-                  </select>
-                </label>
-                <div className={styles.licenseRow}>
-                  <label className={styles.label} style={{ flex: 1 }}>
-                    License fee
-                    <input
-                      className={styles.input}
-                      type="number"
-                      min={0}
-                      step={0.01}
-                      value={licenseFee}
-                      onChange={(e) => setLicenseFee(e.target.value)}
-                    />
-                  </label>
-                  <label className={styles.label} style={{ flex: 1 }}>
-                    Currency
-                    <select
-                      className={styles.select}
-                      value={licenseCurrency}
-                      onChange={(e) => setLicenseCurrency(e.target.value)}
-                    >
-                      <option value="U">$U (AO)</option>
-                      <option value="MATIC">MATIC (Polygon)</option>
-                      <option value="USDC.base">USDC (Base)</option>
-                      <option value="AR">AR (Arweave)</option>
-                    </select>
-                  </label>
-                </div>
-                <p className={styles.hint}>
-                  These values are stored on-chain in the Universal Data License (UDL) fields for this track.
+              <div style={{ marginTop: '8px', padding: '12px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px' }}>
+                <p className={styles.hint} style={{ margin: '0 0 8px 0' }}>
+                  Full-track uploads use Turbo by default for more reliable delivery and availability than direct L1 posting.
                 </p>
+                <label className={styles.checkLabel}>
+                  <input
+                    type="checkbox"
+                    checked={showAdvancedUpload}
+                    onChange={(e) => setShowAdvancedUpload(e.target.checked)}
+                  />
+                  <span>Show advanced upload options</span>
+                </label>
+                {showAdvancedUpload && (
+                  <label className={styles.checkLabel}>
+                    <input
+                      type="checkbox"
+                      checked={!useTurbo}
+                      onChange={(e) => setUseTurbo(!e.target.checked)}
+                    />
+                    <span>Use direct Arweave L1 upload instead of Turbo (fallback only)</span>
+                  </label>
+                )}
               </div>
-              <label className={styles.checkLabel}>
-                <input
-                  type="checkbox"
-                  checked={useTurbo}
-                  onChange={(e) => setUseTurbo(e.target.checked)}
-                />
-                <span>Use Turbo paid upload (credits/AR). Recommended for files over 10MB.</span>
-              </label>
               {useTurbo && (
                 <label className={styles.label}>
-                  Turbo payment
+                  Upload payment
                   <select
                     className={styles.select}
                     value={turboToken}
                     onChange={(e) => setTurboToken(e.target.value as typeof turboToken)}
                   >
-                    <option value="arweave">Arweave (Wander)</option>
-                    <option value="ethereum">Ethereum (ETH wallet)</option>
-                    <option value="base-eth">Base (ETH wallet)</option>
-                    <option value="solana">Solana (Phantom)</option>
-                    <option value="base-usdc">Base (USDC)</option>
-                    <option value="base-ario">Base (ARIO)</option>
-                    <option value="polygon-usdc">Polygon (USDC)</option>
-                    <option value="pol">Polygon (POL)</option>
+                    <option value="arweave">Turbo credits with Wander signer</option>
+                    <option value="ethereum">Turbo via Ethereum wallet</option>
+                    <option value="base-eth">Turbo via Base wallet</option>
+                    <option value="solana">Turbo via Solana wallet</option>
+                    <option value="base-usdc">Turbo via Base USDC</option>
+                    <option value="base-ario">Turbo via Base ARIO</option>
+                    <option value="polygon-usdc">Turbo via Polygon USDC</option>
+                    <option value="pol">Turbo via Polygon POL</option>
                   </select>
                 </label>
               )}
               {useTurbo && (
                 <div style={{ marginTop: '8px', padding: '12px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px' }}>
-                  <p className={styles.hint} style={{ margin: '0 0 8px 0' }}>Need Turbo credits? Top up with a credit card.</p>
+                  <p className={styles.hint} style={{ margin: '0 0 8px 0' }}>
+                    Pay for Arweave uploads with Turbo credits. You can buy Turbo credits with a credit card through Stripe, then spend those credits on uploads.
+                  </p>
+                  <div className={styles.turboBalanceBox}>
+                    <span className={styles.turboBalanceLabel}>Current Turbo balance</span>
+                    {walletType !== 'arweave' ? (
+                      <strong className={styles.turboBalanceValue}>Connect an Arweave wallet to view credits</strong>
+                    ) : turboBalanceLoading ? (
+                      <strong className={styles.turboBalanceValue}>Loading Turbo credits…</strong>
+                    ) : turboBalance ? (
+                      <strong className={styles.turboBalanceValue}>
+                        {formatTurboCredits(turboBalance.effectiveBalance)}
+                      </strong>
+                    ) : (
+                      <strong className={styles.turboBalanceValue}>Turbo credits unavailable</strong>
+                    )}
+                    {turboBalanceError && <span className={styles.turboBalanceError}>{turboBalanceError}</span>}
+                  </div>
+                  <p className={styles.hint} style={{ margin: '0 0 10px 0' }}>
+                    Current publish path: <strong>Turbo credits</strong>{' '}
+                    {turboToken === 'arweave' ? 'with your Arweave wallet balance/credits' : `via ${turboToken}`}.
+                    Raw AR is only used when you enable the direct L1 fallback.
+                  </p>
                   <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
                     <span style={{ fontSize: '1rem', fontWeight: 500 }}>$</span>
                     <input
@@ -650,39 +722,93 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
                       disabled={isTopUpLoading}
                       style={{ margin: 0, padding: '8px 16px', background: 'var(--accent-color)' }}
                     >
-                      {isTopUpLoading ? 'Loading…' : 'Buy Credits'}
+                      {isTopUpLoading ? 'Loading…' : 'Buy Turbo credits with card'}
                     </button>
                   </div>
                 </div>
               )}
               <p className={styles.hint}>
-                Turbo uses the selected wallet for payment and credits.
+                {useTurbo
+                  ? 'Turbo uploads use credits instead of paying raw AR for each upload.'
+                  : 'Direct Arweave L1 upload is fallback-only and may take longer to become streamable from gateways.'}
               </p>
               <p className={styles.hint}>
-                {fullPublishMode === 'direct'
-                  ? 'Direct mode uploads the track as an ANS-104 DataItem via Turbo or a standard Arweave transaction, with StreamVault music tags for discovery.'
-                  : 'Royalties are stored in standard metadata for future distribution and AO-based atomic asset flows.'}
+                Royalties are stored in standard metadata for future distribution/DEX integration.
               </p>
-            </>
-          )}
+          </>
         </div>
 
         {status === 'done' && result?.success && (
           <div className={styles.success}>
             <span className={styles.successBadge}>Permanent</span>
-            {result.confirmed === false && (
-              <span className={styles.pendingBadge}>Pending</span>
+            {(result.confirmed === false || result.gatewayReady === false) && (
+              <span className={styles.pendingBadge}>
+                {result.confirmed === false ? 'Pending' : 'Processing'}
+              </span>
             )}
-            <p className={styles.successText}>Upload complete. Your sound bite is now on-chain.</p>
-            {result.permawebUrl && (
-              <a href={result.permawebUrl} target="_blank" rel="noopener noreferrer" className={styles.link}>
-                View on permaweb
-              </a>
+            <p className={styles.successText}>
+              {result.confirmed === false
+                ? 'Upload accepted. Waiting for block confirmation before gateways reliably stream the file.'
+                : result.gatewayReady === false
+                  ? 'Upload is confirmed on Arweave, but gateway playback is still propagating. The file exists, but streaming may not work yet.'
+                  : 'Upload complete. Your full track is on Arweave.'}
+            </p>
+            {useTurbo && (
+              <p className={styles.hint}>
+                This upload used <strong>Turbo credits</strong>{' '}
+                {turboToken === 'arweave' ? 'through your connected Arweave wallet' : `via ${turboToken}`},
+                not a direct raw-AR L1 post.
+              </p>
             )}
-            {result.arioUrl && (
-              <a href={result.arioUrl} target="_blank" rel="noopener noreferrer" className={styles.link}>
-                View on ar.io
-              </a>
+            {(useTurbo ? turboCostEstimate !== null : l1CostEstimate !== null) && (
+              <p className={styles.hint}>
+                Estimated cost:{' '}
+                <strong>
+                  {useTurbo
+                    ? `~${formatTurboCredits(turboCostEstimate || 0)}`
+                    : `~${formatArFromWinston(l1CostEstimate || 0)}`}
+                </strong>
+              </p>
+            )}
+            {(result.confirmed === false || result.gatewayReady === false) && result.txId && (
+              <p className={styles.hint}>
+                Until a gateway serves the audio body, opening the data link can return <strong>404</strong>,
+                <strong> pending</strong>, or fail to stream even though the explorer already shows the transaction.
+                Check the tx metadata here if you need the raw transaction record:{' '}
+                <a
+                  className={styles.link}
+                  href={arweaveTxMetaUrl(result.txId)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  View tx JSON
+                </a>
+                . Retry the same gateway link after confirmations and gateway propagation catch up.
+              </p>
+            )}
+            {(result.permawebUrl || result.arioUrl) && (
+              <>
+                <a
+                  href={result.arioUrl || result.permawebUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className={styles.link}
+                >
+                  Verify audio URL
+                </a>
+                {result.permawebUrl && result.arioUrl && result.arioUrl !== result.permawebUrl && (
+                  <a href={result.arioUrl} target="_blank" rel="noopener noreferrer" className={styles.link}>
+                    Alternate gateway
+                  </a>
+                )}
+                <button
+                  type="button"
+                  className={styles.copyBtn}
+                  onClick={() => handleCopyAudioUrl(result.arioUrl || result.permawebUrl || '')}
+                >
+                  {copiedAudioUrl ? 'Copied audio URL' : 'Copy audio URL'}
+                </button>
+              </>
             )}
             {result.txId && <p className={styles.assetId}>Tx ID: {result.txId.slice(0, 12)}…</p>}
             {result.txId && (
@@ -722,11 +848,11 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
           >
             {status === 'uploading' || status === 'confirming'
               ? 'Publishing…'
-                : status === 'done'
-                  ? 'Done'
-                  : !address
-                    ? 'Connect wallet to publish'
-                  : `Publish ${tier === 'sample' ? 'sample' : fullPublishMode === 'direct' ? 'full track' : 'full asset'}`}
+              : status === 'done'
+                ? 'Done'
+                : !address
+                  ? 'Connect wallet to publish'
+                  : 'Publish to Arweave'}
           </button>
         </div>
 
@@ -757,23 +883,7 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
               className={styles.publishBtn}
               style={{ width: '100%' }}
               disabled={isConnecting}
-              onClick={() =>
-                connect('arweave')
-                  .then((addr) => {
-                    trackEvent('publish_wallet_connect_success', {
-                      wallet_type: 'arweave',
-                      address_prefix: addr ? `${addr.slice(0, 6)}...${addr.slice(-4)}` : 'unknown',
-                    });
-                    setShowWalletChooser(false);
-                  })
-                  .catch((e: any) => {
-                    trackEvent('publish_wallet_connect_failed', {
-                      wallet_type: 'arweave',
-                      reason: String(e?.message || 'connect_error').slice(0, 200),
-                    });
-                    setErrorMessage(String(e?.message || 'Failed to connect Arweave wallet.'));
-                  })
-              }
+              onClick={() => connect('arweave').then(() => setShowWalletChooser(false))}
             >
               🔑 Arweave (Wander)
             </button>
@@ -782,22 +892,7 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
               className={styles.publishBtn}
               style={{ width: '100%', background: 'rgba(98,126,234,0.85)' }}
               disabled={isConnecting}
-              onClick={() =>
-                connect('ethereum')
-                  .then(() => {
-                    trackEvent('publish_wallet_connect_success', {
-                      wallet_type: 'ethereum',
-                    });
-                    setShowWalletChooser(false);
-                  })
-                  .catch((e: any) => {
-                    trackEvent('publish_wallet_connect_failed', {
-                      wallet_type: 'ethereum',
-                      reason: String(e?.message || 'connect_error').slice(0, 200),
-                    });
-                    setErrorMessage(String(e?.message || 'Failed to connect Ethereum wallet.'));
-                  })
-              }
+              onClick={() => connect('ethereum').then(() => setShowWalletChooser(false))}
             >
               🦊 Ethereum / MetaMask
             </button>
@@ -806,22 +901,7 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
               className={styles.publishBtn}
               style={{ width: '100%', background: 'rgba(20,180,130,0.85)' }}
               disabled={isConnecting}
-              onClick={() =>
-                connect('solana')
-                  .then(() => {
-                    trackEvent('publish_wallet_connect_success', {
-                      wallet_type: 'solana',
-                    });
-                    setShowWalletChooser(false);
-                  })
-                  .catch((e: any) => {
-                    trackEvent('publish_wallet_connect_failed', {
-                      wallet_type: 'solana',
-                      reason: String(e?.message || 'connect_error').slice(0, 200),
-                    });
-                    setErrorMessage(String(e?.message || 'Failed to connect Solana wallet.'));
-                  })
-              }
+              onClick={() => connect('solana').then(() => setShowWalletChooser(false))}
             >
               👻 Solana (Phantom)
             </button>

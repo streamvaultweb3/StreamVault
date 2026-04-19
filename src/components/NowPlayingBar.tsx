@@ -1,14 +1,8 @@
-import { useState } from 'react';
-import { createPortal } from 'react-dom';
 import { usePlayer } from '../context/PlayerContext';
-import { useWallet } from '../context/WalletContext';
-import { PublishModal } from './PublishModal';
 import styles from './NowPlayingBar.module.css';
 
 export function NowPlayingBar() {
   const { currentTrack, isPlaying, progress, toggle, seek } = usePlayer();
-  const { walletType } = useWallet();
-  const [isPublishOpen, setIsPublishOpen] = useState(false);
 
   if (!currentTrack) return null;
 
@@ -45,29 +39,10 @@ export function NowPlayingBar() {
         </div>
       </div>
       <div className={styles.badges}>
-        <button
-          type="button"
-          className={styles.publishCta}
-          onClick={() => setIsPublishOpen(true)}
-          disabled={walletType !== 'arweave'}
-          title={walletType !== 'arweave' ? 'Connect Wander to publish to Arweave' : 'Publish permanently to Arweave'}
-        >
-          Publish
-        </button>
         {currentTrack.isPermanent && (
-          <span className={styles.permaBadge} title="Permanently stored on Arweave">Permanent</span>
+          <span className={styles.permaBadge} title="Stored on Arweave">On Arweave</span>
         )}
       </div>
-      {isPublishOpen && typeof document !== 'undefined'
-        ? createPortal(
-            <PublishModal
-              track={currentTrack}
-              onClose={() => setIsPublishOpen(false)}
-              onSuccess={() => setIsPublishOpen(false)}
-            />,
-            document.body
-          )
-        : null}
     </div>
   );
 }

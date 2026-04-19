@@ -1,14 +1,65 @@
 /**
- * Publish flows: sample (data tx, <100kb) and full (atomic asset with metadata).
- * Uses Arweave wallet for signing and permaweb-libs for atomic assets.
+ * Publish flows: audio data txs and optional atomic assets.
+ *
+ * Tag layout follows:
+ * - [ANS-104](https://github.com/ArweaveTeam/arweave-standards/blob/master/ans/ANS-104.md): UTF-8 name/value tags
+ *   (≤128 tags; keys/values non-empty and bounded — enforced by gateways / @dha-team/arbundles when bundling).
+ * - [ANS-110](https://github.com/ArweaveTeam/arweave-standards/blob/master/ans/ANS-110.md) (draft): discoverable
+ *   assets use `Title` + `Type` where `Type` is a category (`music`, `image`, …) — not upload format (full vs sample).
+ *
+ * Index of ANS docs: https://github.com/ArweaveTeam/arweave-standards/tree/master/ans
  */
 
 import type { PublishResult } from '../lib/arweave';
+import {
+  arweaveDataGatewayHost,
+  arweaveTxDataUrl,
+  arweaveTxDataUrls,
+  arweaveTxStatusUrls,
+} from './arweaveDataGateway';
 import type { UdlConfig, RoyaltySplit } from './udl';
+import { udlConfigToTags } from './udl';
 import { registerTrackOnAO } from './aoMusicRegistry';
 
-const GATEWAY = 'https://arweave.net';
-const AR_IO_GATEWAY = 'https://ar-io.net';
+/**
+ * ANS-104 allows repeated tag names, but many gateways / GraphQL indexers assume
+ * at most one `Content-Type` and duplicate names can break search or MIME routing.
+ * We collapse to the first occurrence per tag name (our tag order is intentional).
+ */
+function dedupeArweaveTags(tags: { name: string; value: string }[]): { name: string; value: string }[] {
+  const seen = new Set<string>();
+  const out: { name: string; value: string }[] = [];
+  for (const t of tags) {
+    if (!t || typeof t.name !== 'string' || typeof t.value !== 'string') continue;
+    if (seen.has(t.name)) continue;
+    seen.add(t.name);
+    out.push({ name: t.name, value: t.value });
+  }
+  return out;
+}
+
+/** Unicode NFC so titles/artists match GraphQL text search across composed vs decomposed accents. */
+function nfc(s: string): string {
+  try {
+    return s.normalize('NFC');
+  } catch {
+    return s;
+  }
+}
+
+/** ANS-110 draft: Title max 150 chars. https://github.com/ArweaveTeam/arweave-standards/blob/master/ans/ANS-110.md */
+const ANS110_MAX_TITLE = 150;
+
+/** ANS-110 `Type` for music assets (category, not upload tier). */
+const ANS110_TYPE_MUSIC = 'music';
+/** ANS-110 `Type` for cover artwork. */
+const ANS110_TYPE_IMAGE = 'image';
+
+function ans110Title(s: string): string {
+  const t = nfc(s).trim();
+  if (t.length <= ANS110_MAX_TITLE) return t;
+  return t.slice(0, ANS110_MAX_TITLE);
+}
 
 interface PermawebLibs {
   createAtomicAsset?: (args: {
@@ -32,15 +83,27 @@ interface TurboUploadOptions {
   paymentToken: TurboPaymentToken;
 }
 
-interface FullAudioUploadArgs {
-  audio: Blob;
-  title: string;
-  artist: string;
-  creatorAddress: string;
-  useTurbo?: boolean;
-  turboPaymentToken?: TurboPaymentToken;
-  udl?: UdlConfig;
-  splits?: RoyaltySplit[];
+function describePublishError(error: unknown, context?: { useTurbo?: boolean; fromAudiusStream?: boolean }): string {
+  const raw = String((error as any)?.message || error || '').trim();
+  if (!raw) {
+    return 'Full asset publish failed.';
+  }
+
+  if (raw === 'Failed to fetch') {
+    if (context?.fromAudiusStream) {
+      return 'Failed to fetch the source audio. The Audius/CDN request was blocked or unavailable. Try uploading the file from disk instead.';
+    }
+    if (context?.useTurbo) {
+      return 'Turbo upload request failed to reach the upload service. This is usually a temporary network/service issue, not a raw AR payment issue. Retry the upload, and if it persists check your Turbo credits and wallet connection.';
+    }
+    return 'Upload network request failed before Arweave confirmed the file. Retry the upload.';
+  }
+
+  if (context?.useTurbo && /insufficient|balance|credit|payment/i.test(raw)) {
+    return `Turbo credits/payment issue: ${raw}`;
+  }
+
+  return raw;
 }
 
 async function uploadWithTurbo(args: TurboUploadOptions): Promise<string> {
@@ -75,12 +138,9 @@ async function uploadWithTurbo(args: TurboUploadOptions): Promise<string> {
       : new File([args.file], 'streamvault-upload', { type: args.file.type || 'application/octet-stream' });
 
   console.info('[turbo] Uploading file', { size: args.file.size });
-  // #region agent log
-  fetch('http://127.0.0.1:7939/ingest/0b5e774a-21c9-48b0-b426-076405dcd7ec',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'935ac8'},body:JSON.stringify({sessionId:'935ac8',runId:'pre-fix',hypothesisId:'H1',location:'src/lib/publish.ts:66',message:'turbo-upload-start',data:{paymentToken:args.paymentToken,fileSize:args.file.size},timestamp:Date.now()})}).catch(()=>{});
-  // #endregion agent log
   const result = await turbo.uploadFile({
     file: fileToUpload,
-    dataItemOpts: { tags: args.tags },
+    dataItemOpts: { tags: dedupeArweaveTags(args.tags) },
     events: {
       onUploadProgress: ({ totalBytes, processedBytes }) => {
         console.info('[turbo] Upload progress', { totalBytes, processedBytes });
@@ -95,70 +155,6 @@ async function uploadWithTurbo(args: TurboUploadOptions): Promise<string> {
   });
 
   return result.id;
-}
-
-function buildFullAudioTags(args: FullAudioUploadArgs): { name: string; value: string }[] {
-  const tags: { name: string; value: string }[] = [
-    { name: 'App-Name', value: 'StreamVault' },
-    { name: 'App-Version', value: '1.0.0' },
-    { name: 'Protocol', value: 'StreamVault' },
-    { name: 'Data-Protocol', value: 'StreamVault' },
-    { name: 'Type', value: 'audio-full' },
-    { name: 'Content-Type', value: args.audio.type || 'audio/mpeg' },
-    { name: 'Title', value: args.title },
-    { name: 'Artist', value: args.artist },
-    { name: 'Creator', value: args.creatorAddress },
-    { name: 'Upload-Type', value: args.useTurbo ? 'turbo-ans104' : 'arweave-transaction' },
-    { name: 'Unix-Time', value: String(Date.now()) },
-  ];
-
-  if (args.udl) {
-    tags.push(
-      { name: 'License', value: args.udl.licenseId },
-      ...(args.udl.uri ? [{ name: 'License-URI', value: args.udl.uri }] : []),
-      { name: 'License-Use', value: args.udl.usage.join(',') },
-      { name: 'License-AI-Use', value: args.udl.aiUse },
-      { name: 'License-Fee', value: args.udl.fee },
-      { name: 'License-Fee-Unit', value: args.udl.interval },
-      { name: 'License-Currency', value: args.udl.currency },
-      ...(args.udl.attribution ? [{ name: 'License-Attribution', value: args.udl.attribution }] : []),
-      ...(args.udl.jurisdiction ? [{ name: 'License-Jurisdiction', value: args.udl.jurisdiction }] : []),
-    );
-  }
-
-  if (args.splits && args.splits.length > 0) {
-    tags.push({ name: 'Royalties-Splits', value: JSON.stringify(args.splits) });
-  }
-
-  return tags;
-}
-
-async function uploadFullAudio(args: FullAudioUploadArgs): Promise<string> {
-  const baseTags = buildFullAudioTags(args);
-
-  if (args.useTurbo) {
-    try {
-      return await uploadWithTurbo({
-        file: args.audio,
-        tags: baseTags,
-        paymentToken: args.turboPaymentToken || 'arweave',
-      });
-    } catch (e: any) {
-      const msg = String(e?.message || e || '');
-      const isGatewayIssue =
-        msg.includes('getPrice') ||
-        msg.includes('Bad Gateway') ||
-        msg.includes('502') ||
-        msg.includes('Website is offline');
-      if (!isGatewayIssue) throw e;
-    }
-  }
-
-  const data = await args.audio.arrayBuffer();
-  if (data.byteLength > 10 * 1024 * 1024) {
-    throw new Error('File too large for direct wallet upload (max ~10MB without Turbo).');
-  }
-  return uploadDataTx(data, args.audio.type || 'audio/mpeg', baseTags);
 }
 
 /**
@@ -223,10 +219,14 @@ async function uploadDataTx(
   if (!wallet) throw new Error('Wander wallet required to publish.');
 
   const Arweave = (await import('arweave')).default;
-  const arweave = Arweave.init({ host: 'arweave.net', port: 443, protocol: 'https' });
+  const arweave = Arweave.init(arweaveDataGatewayHost());
   const tx = await arweave.createTransaction({ data: new Uint8Array(data) });
-  tags.forEach(({ name, value }) => tx.addTag(name, value));
-  tx.addTag('Content-Type', contentType);
+  const uniqueTags = dedupeArweaveTags(tags);
+  const hasContentType = uniqueTags.some((t) => t.name === 'Content-Type');
+  uniqueTags.forEach(({ name, value }) => tx.addTag(name, value));
+  if (!hasContentType) {
+    tx.addTag('Content-Type', contentType);
+  }
 
   console.info('[arweave] Signing transaction', { contentType, dataBytes: data.byteLength });
   const signedTx = await wallet.sign(tx);
@@ -246,35 +246,69 @@ export async function uploadImageTx(file: Blob, tags: { name: string; value: str
   const txId = await uploadDataTx(
     data,
     contentType,
-    [
+    dedupeArweaveTags([
       { name: 'App-Name', value: 'StreamVault' },
-      { name: 'Type', value: 'cover-art' },
+      { name: 'Type', value: ANS110_TYPE_IMAGE },
       ...tags,
-    ]
+    ])
   );
-  return `${GATEWAY}/${txId}`;
+  return arweaveTxDataUrl(txId);
 }
 
-async function waitForConfirmation(txId: string, timeoutMs = 45_000): Promise<boolean> {
-  const Arweave = (await import('arweave')).default;
-  const arweave = Arweave.init({ host: 'arweave.net', port: 443, protocol: 'https' });
-  const ario = Arweave.init({ host: 'ar-io.net', port: 443, protocol: 'https' });
+async function waitForConfirmation(txId: string, timeoutMs = 90_000): Promise<boolean> {
   const start = Date.now();
 
   while (Date.now() - start < timeoutMs) {
-    try {
-      const status = await arweave.transactions.getStatus(txId);
-      if (status.status === 200) return true;
-    } catch {
-      // ignore and retry
-    }
-    try {
-      const status = await ario.transactions.getStatus(txId);
-      if (status.status === 200) return true;
-    } catch {
-      // ignore and retry
+    for (const url of arweaveTxStatusUrls(txId)) {
+      try {
+        const res = await fetch(url, {
+          method: 'GET',
+          headers: { Accept: 'application/json' },
+          cache: 'no-store',
+        });
+        if (res.status === 200) return true;
+      } catch {
+        // ignore and try next gateway
+      }
     }
     await new Promise((r) => setTimeout(r, 2_000));
+  }
+  return false;
+}
+
+async function isGatewayAudioReady(txId: string, expectedContentType?: string): Promise<boolean> {
+  for (const url of arweaveTxDataUrls(txId)) {
+    try {
+      const res = await fetch(url, {
+        method: 'GET',
+        headers: { Range: 'bytes=0-1' },
+        cache: 'no-store',
+      });
+      if (!(res.status === 200 || res.status === 206)) continue;
+      const contentType = (res.headers.get('content-type') || '').toLowerCase();
+      if (expectedContentType && contentType && !contentType.includes(expectedContentType.toLowerCase().split(';')[0])) {
+        continue;
+      }
+      if (contentType.startsWith('audio/') || contentType.includes('mpeg') || contentType.includes('mp3')) {
+        return true;
+      }
+    } catch {
+      // ignore and try next gateway
+    }
+  }
+  return false;
+}
+
+async function waitForGatewayAudioReady(
+  txId: string,
+  expectedContentType: string,
+  timeoutMs = 120_000
+): Promise<boolean> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const ready = await isGatewayAudioReady(txId, expectedContentType);
+    if (ready) return true;
+    await new Promise((r) => setTimeout(r, 3_000));
   }
   return false;
 }
@@ -286,29 +320,37 @@ export async function publishSampleToArweave(
     title: string;
     artist: string;
     durationSeconds: number;
+    udl?: UdlConfig;
+    splits?: RoyaltySplit[];
+    audiusTrackId?: string;
   }
 ): Promise<PublishResult> {
   try {
     console.info('[publish] Sample publish started', { title: args.title, artist: args.artist });
     const data = await args.sample.arrayBuffer();
-    const txId = await uploadDataTx(
-      data,
-      args.sample.type || 'audio/mpeg',
-      [
-        { name: 'App-Name', value: 'StreamVault' },
-        { name: 'Protocol', value: 'StreamVault' },
-        { name: 'App-Version', value: '1.0.0' },
-        { name: 'Type', value: 'audio-sample' },
-        { name: 'Content-Type', value: args.sample.type || 'audio/mpeg' },
-        { name: 'Title', value: args.title },
-        { name: 'Artist', value: args.artist },
-        { name: 'Duration-Seconds', value: String(args.durationSeconds) },
-      ]
-    );
+    const tags: { name: string; value: string }[] = [
+      { name: 'App-Name', value: 'StreamVault' },
+      { name: 'Type', value: ANS110_TYPE_MUSIC },
+      { name: 'Content-Type', value: args.sample.type || 'audio/mpeg' },
+      { name: 'Title', value: ans110Title(args.title) },
+      { name: 'Artist', value: nfc(args.artist) },
+      { name: 'Duration-Seconds', value: String(args.durationSeconds) },
+    ];
+    if (args.audiusTrackId) {
+      tags.push({ name: 'Audius-Track-Id', value: args.audiusTrackId });
+    }
+    if (args.udl) {
+      tags.push(...udlConfigToTags(args.udl));
+    }
+    if (args.splits && args.splits.length > 0) {
+      tags.push({ name: 'Royalties-Splits', value: JSON.stringify(args.splits) });
+    }
+    const txId = await uploadDataTx(data, args.sample.type || 'audio/mpeg', dedupeArweaveTags(tags));
     const confirmed = await waitForConfirmation(txId).catch(() => false);
-    const permawebUrl = `${GATEWAY}/${txId}`;
+    const gatewayReady = await waitForGatewayAudioReady(txId, args.sample.type || 'audio/mpeg', 60_000).catch(() => false);
+    const permawebUrl = arweaveTxDataUrl(txId);
     console.info('[publish] Sample publish complete', { txId, permawebUrl });
-    return { success: true, txId, permawebUrl, arioUrl: `${AR_IO_GATEWAY}/${txId}`, confirmed };
+    return { success: true, txId, permawebUrl, arioUrl: arweaveTxDataUrls(txId)[1], confirmed, gatewayReady };
   } catch (e: any) {
     console.error('[publish] Sample publish failed', e);
     return { success: false, error: e?.message || 'Sample upload failed' };
@@ -329,41 +371,165 @@ export async function publishFullAsAtomicAsset(
     splits?: RoyaltySplit[];
     useTurbo?: boolean;
     turboPaymentToken?: TurboPaymentToken;
+    /** If true, only upload the signed data tx with tags (no permaweb-libs atomic asset). */
+    skipAtomicAsset?: boolean;
+    audiusTrackId?: string;
+    fromAudiusStream?: boolean;
   },
   creatorAddress: string,
   ctx: { libs: PermawebLibs | null }
 ): Promise<PublishResult> {
   const libs = ctx.libs;
-  if (!libs?.createAtomicAsset) return { success: false, error: 'Atomic asset creation not available.' };
+  if (!args.skipAtomicAsset && !libs?.createAtomicAsset) {
+    return { success: false, error: 'Atomic asset creation not available. Try “Skip atomic asset” to upload audio + UDL tags only.' };
+  }
 
   try {
-    console.info('[publish] Full asset publish started', { title: args.title, artist: args.artist });
+    const title = ans110Title(args.title);
+    const artist = nfc(args.artist);
+    console.info('[publish] Full asset publish started', { title, artist });
     const udl = args.udl;
     const splits = args.splits;
     let artworkUrlToUse = args.artworkUrl;
     if (args.artworkFile) {
       console.info('[publish] Uploading cover image to Arweave');
       artworkUrlToUse = await uploadImageTx(args.artworkFile, [
-        { name: 'Title', value: args.title },
-        { name: 'Artist', value: args.artist },
+        { name: 'Title', value: title },
+        { name: 'Artist', value: artist },
       ]);
     }
-    const txId = await uploadFullAudio({
-      audio: args.audio,
-      title: args.title,
-      artist: args.artist,
-      creatorAddress,
-      useTurbo: args.useTurbo,
-      turboPaymentToken: args.turboPaymentToken,
-      udl,
-      splits,
+    let txId: string;
+    let usedTurboUpload = false;
+    const baseTags: { name: string; value: string }[] = [
+      { name: 'App-Name', value: 'StreamVault' },
+      { name: 'Type', value: ANS110_TYPE_MUSIC },
+      { name: 'Content-Type', value: args.audio.type || 'audio/mpeg' },
+      { name: 'Title', value: title },
+      { name: 'Artist', value: artist },
+      { name: 'Creator', value: creatorAddress },
+    ];
+    if (args.audiusTrackId) {
+      baseTags.push({ name: 'Audius-Track-Id', value: args.audiusTrackId });
+    }
+    const desc = args.description?.trim();
+    if (desc) {
+      baseTags.push({ name: 'Description', value: nfc(desc).slice(0, 300) });
+    }
+
+    if (udl) {
+      baseTags.push(...udlConfigToTags(udl));
+    }
+
+    if (splits && splits.length > 0) {
+      baseTags.push({ name: 'Royalties-Splits', value: JSON.stringify(splits) });
+    }
+
+    const confirmTimeoutMs = Math.min(
+      180_000,
+      Math.max(60_000, Math.floor((args.audio.size / (1024 * 1024)) * 30_000) + 45_000)
+    );
+
+    if (args.useTurbo) {
+      try {
+        txId = await uploadWithTurbo({
+          file: args.audio,
+          tags: dedupeArweaveTags(baseTags),
+          paymentToken: args.turboPaymentToken || 'arweave',
+        });
+        usedTurboUpload = true;
+      } catch (e: any) {
+        const msg = String(e?.message || e || '');
+        const isGatewayIssue =
+          msg.includes('getPrice') ||
+          msg.includes('Bad Gateway') ||
+          msg.includes('502') ||
+          msg.includes('Website is offline');
+        if (isGatewayIssue && args.audio.size <= 10 * 1024 * 1024) {
+          // Fallback: try direct Arweave upload so creators can still publish when Turbo is down.
+          const data = await args.audio.arrayBuffer();
+          txId = await uploadDataTx(
+            data,
+            args.audio.type || 'audio/mpeg',
+            dedupeArweaveTags(baseTags)
+          );
+        } else {
+          throw e;
+        }
+      }
+    } else {
+      const data = await args.audio.arrayBuffer();
+      if (data.byteLength > 10 * 1024 * 1024) return { success: false, error: 'File too large (max ~10MB).' };
+
+      txId = await uploadDataTx(
+        data,
+        args.audio.type || 'audio/mpeg',
+        dedupeArweaveTags(baseTags)
+      );
+    }
+    let confirmed = false;
+    if (usedTurboUpload) {
+      // Turbo returns a data item id that is immediately usable as a gateway URL,
+      // but `/tx/<id>/status` is not a reliable confirmation endpoint for that id.
+      // Treat Turbo upload success as accepted and verify availability via data URL probing instead.
+      confirmed = true;
+      console.info('[publish] Turbo upload accepted; skipping raw tx status polling', { txId });
+    } else {
+      console.info('[publish] Waiting for L1 confirmation (GraphQL discovery is usually post-confirmation)', {
+        txId,
+        confirmTimeoutMs,
+      });
+      confirmed = await waitForConfirmation(txId, confirmTimeoutMs).catch(() => false);
+    }
+    const gatewayReadyTimeoutMs = Math.min(
+      240_000,
+      Math.max(90_000, Math.floor((args.audio.size / (1024 * 1024)) * 45_000) + 60_000)
+    );
+    console.info('[publish] Waiting for gateway audio availability', {
+      txId,
+      gatewayReadyTimeoutMs,
     });
-    const confirmed = await waitForConfirmation(txId).catch(() => false);
-    const permawebUrl = `${GATEWAY}/${txId}`;
+    const gatewayReady = await waitForGatewayAudioReady(
+      txId,
+      args.audio.type || 'audio/mpeg',
+      gatewayReadyTimeoutMs
+    ).catch(() => false);
+    const permawebUrl = arweaveTxDataUrl(txId);
+
+    if (args.skipAtomicAsset) {
+      try {
+        await registerTrackOnAO({
+          assetId: txId,
+          audioTxId: txId,
+          creator: creatorAddress,
+          udl,
+          splits,
+          tags: {
+            Title: title,
+            Artist: artist,
+            Source: 'streamvault-data-tx',
+          },
+        });
+      } catch (e) {
+        console.warn('[publish] Failed to register data-tx track on AO', e);
+      }
+      return {
+        success: true,
+        txId,
+        assetId: undefined,
+        permawebUrl,
+        arioUrl: arweaveTxDataUrls(txId)[1],
+        confirmed,
+        gatewayReady,
+      };
+    }
+
+    if (!libs?.createAtomicAsset) {
+      return { success: false, error: 'Atomic asset creation not available.' };
+    }
 
     const metadata: Record<string, unknown> = {
       audioTxId: txId,
-      artist: args.artist,
+      artist,
       artwork: artworkUrlToUse || undefined,
       royaltiesBps: args.royaltiesBps ?? undefined,
     };
@@ -372,24 +538,15 @@ export async function publishFullAsAtomicAsset(
 
     const assetTags: { name: string; value: string }[] = [
       { name: 'App-Name', value: 'StreamVault' },
-      { name: 'Protocol', value: 'StreamVault' },
-      { name: 'App-Version', value: '1.0.0' },
-      { name: 'Type', value: 'music-atomic-asset' },
+      { name: 'Type', value: ANS110_TYPE_MUSIC },
+      { name: 'Title', value: title },
       { name: 'Track-AudioTx', value: txId },
-      { name: 'Artist', value: args.artist },
+      { name: 'Artist', value: artist },
       { name: 'Creator', value: creatorAddress },
     ];
 
     if (udl) {
-      assetTags.push(
-        { name: 'License', value: udl.licenseId },
-        ...(udl.uri ? [{ name: 'License-URI', value: udl.uri }] : []),
-        { name: 'License-Use', value: udl.usage.join(',') },
-        { name: 'License-AI-Use', value: udl.aiUse },
-        { name: 'License-Fee', value: udl.fee },
-        { name: 'License-Fee-Unit', value: udl.interval },
-        { name: 'License-Currency', value: udl.currency },
-      );
+      assetTags.push(...udlConfigToTags(udl));
     }
 
     if (splits && splits.length > 0) {
@@ -397,15 +554,15 @@ export async function publishFullAsAtomicAsset(
     }
 
     const assetId = await libs.createAtomicAsset({
-      name: args.title,
-      description: args.description || `Permanent release by ${args.artist}`,
+      name: title,
+      description: args.description || `Permanent release by ${artist}`,
       topics: ['Music', 'StreamVault', 'Atomic-Asset'],
       creator: creatorAddress,
       data: permawebUrl,
       contentType: 'text/plain',
       assetType: 'audio',
       metadata,
-      tags: assetTags,
+      tags: dedupeArweaveTags(assetTags),
     });
 
     console.info('[publish] Full asset publish complete', { txId, assetId, permawebUrl });
@@ -419,8 +576,8 @@ export async function publishFullAsAtomicAsset(
         udl,
         splits,
         tags: {
-          Title: args.title,
-          Artist: args.artist,
+          Title: title,
+          Artist: artist,
         },
       });
     } catch (e) {
@@ -431,65 +588,18 @@ export async function publishFullAsAtomicAsset(
       txId,
       assetId,
       permawebUrl,
-      arioUrl: `${AR_IO_GATEWAY}/${txId}`,
+      arioUrl: arweaveTxDataUrls(txId)[1],
       confirmed,
+      gatewayReady,
     };
   } catch (e: any) {
     console.error('[publish] Full asset publish failed', e);
-    return { success: false, error: e?.message || 'Full asset publish failed' };
-  }
-}
-
-export async function publishFullDirectToArweave(
-  args: {
-    audio: Blob;
-    title: string;
-    artist: string;
-    description?: string;
-    artworkUrl?: string;
-    artworkFile?: Blob;
-    udl?: UdlConfig;
-    splits?: RoyaltySplit[];
-    useTurbo?: boolean;
-    turboPaymentToken?: TurboPaymentToken;
-  },
-  creatorAddress: string
-): Promise<PublishResult> {
-  try {
-    console.info('[publish] Direct full upload started', { title: args.title, artist: args.artist });
-    let artworkUrlToUse = args.artworkUrl;
-    if (args.artworkFile) {
-      artworkUrlToUse = await uploadImageTx(args.artworkFile, [
-        { name: 'Title', value: args.title },
-        { name: 'Artist', value: args.artist },
-      ]);
-    }
-
-    const txId = await uploadFullAudio({
-      audio: args.audio,
-      title: args.title,
-      artist: args.artist,
-      creatorAddress,
-      useTurbo: args.useTurbo,
-      turboPaymentToken: args.turboPaymentToken,
-      udl: args.udl,
-      splits: args.splits,
-    });
-
-    const confirmed = await waitForConfirmation(txId).catch(() => false);
-    const permawebUrl = `${GATEWAY}/${txId}`;
-
-    console.info('[publish] Direct full upload complete', { txId, permawebUrl, artworkUrlToUse });
-
     return {
-      success: true,
-      txId,
-      permawebUrl,
-      arioUrl: `${AR_IO_GATEWAY}/${txId}`,
-      confirmed,
+      success: false,
+      error: describePublishError(e, {
+        useTurbo: args.useTurbo,
+        fromAudiusStream: args.fromAudiusStream,
+      }),
     };
-  } catch (e: any) {
-    console.error('[publish] Direct full upload failed', e);
-    return { success: false, error: e?.message || 'Direct full upload failed' };
   }
 }

@@ -1,4 +1,5 @@
 import Arweave from 'arweave';
+import { arweaveTxDataUrl } from './arweaveDataGateway';
 import { connect as aoConnect } from '@permaweb/aoconnect';
 // @ts-expect-error - package has default export at runtime
 import Permaweb from '@permaweb/libs';
@@ -77,6 +78,12 @@ function getReadNodeUrl(): string {
   );
 }
 
+function getAlternateReadLibs(libs: any) {
+  const fallback = getFallbackReadLibs();
+  if (!fallback || fallback === libs) return null;
+  return fallback;
+}
+
 async function isProcessComputeHealthy(processId: string): Promise<boolean> {
   if (!shouldPreferFallbackReads()) {
     return true;
@@ -131,8 +138,8 @@ export function resolveProfileMediaUrl(raw: any): string | null {
   const value = raw.trim();
   if (!value || value === 'None') return null;
   if (value.startsWith('http://') || value.startsWith('https://') || value.startsWith('data:')) return value;
-  if (value.startsWith('ar://')) return `https://arweave.net/${value.slice(5)}`;
-  return `https://arweave.net/${value}`;
+  if (value.startsWith('ar://')) return arweaveTxDataUrl(value.slice(5));
+  return arweaveTxDataUrl(value);
 }
 
 export function getProfileDisplayName(profile: any): string | null {
@@ -380,6 +387,7 @@ export async function getLatestProfileByWallet(
   if (!libs || !walletAddress) return { id: null };
   const preferFallback = shouldPreferFallbackReads();
   const readLibs = preferFallback ? (getFallbackReadLibs() || libs) : libs;
+  const alternateReadLibs = getAlternateReadLibs(readLibs);
   const timeoutMs = opts?.timeoutMs ?? 6000;
   const gateway = opts?.gateway ?? 'ao-search-gateway.goldsky.com';
 
@@ -412,6 +420,21 @@ export async function getLatestProfileByWallet(
             return candidate;
           }
         } catch {
+          if (alternateReadLibs?.getProfileById) {
+            try {
+              const candidate = await withTimeout<any>(
+                alternateReadLibs.getProfileById(option.id),
+                timeoutMs,
+                'getProfileById:fallback'
+              );
+              if (candidate?.id) {
+                LATEST_PROFILE_CACHE.set(walletAddress.toLowerCase(), { at: Date.now(), data: candidate });
+                return candidate;
+              }
+            } catch {
+              // continue below
+            }
+          }
           PROFILE_READ_FAIL_UNTIL.set(option.id, Date.now() + PROFILE_READ_FAIL_TTL_MS);
         }
       }
@@ -420,7 +443,20 @@ export async function getLatestProfileByWallet(
         return failUntil <= Date.now();
       });
       if (firstHealthy) {
-        const latest = await withTimeout<any>(readLibs.getProfileById(firstHealthy.id), timeoutMs, 'getProfileById');
+        let latest = null;
+        try {
+          latest = await withTimeout<any>(readLibs.getProfileById(firstHealthy.id), timeoutMs, 'getProfileById');
+        } catch {
+          if (alternateReadLibs?.getProfileById) {
+            latest = await withTimeout<any>(
+              alternateReadLibs.getProfileById(firstHealthy.id),
+              timeoutMs,
+              'getProfileById:fallback'
+            );
+          } else {
+            throw new Error('Primary profile read failed');
+          }
+        }
         if (latest?.id) {
           LATEST_PROFILE_CACHE.set(walletAddress.toLowerCase(), { at: Date.now(), data: latest });
           return latest;
@@ -446,7 +482,21 @@ export async function getLatestProfileByWallet(
         return sdkProfile;
       }
     } catch {
-      // Fallback below.
+      if (alternateReadLibs?.getProfileByWalletAddress) {
+        try {
+          const sdkProfile: any = await withTimeout<any>(
+            alternateReadLibs.getProfileByWalletAddress(walletAddress),
+            timeoutMs,
+            'getProfileByWalletAddress:fallback'
+          );
+          if (sdkProfile?.id) {
+            LATEST_PROFILE_CACHE.set(walletAddress.toLowerCase(), { at: Date.now(), data: sdkProfile });
+            return sdkProfile;
+          }
+        } catch {
+          // Fallback below.
+        }
+      }
     }
   }
   const empty = { id: null };
@@ -473,6 +523,7 @@ export async function getProfileByIdSafe(
   if (failUntil > Date.now()) return null;
   const preferFallback = shouldPreferFallbackReads();
   const readLibs = preferFallback ? (getFallbackReadLibs() || libs) : libs;
+  const alternateReadLibs = getAlternateReadLibs(readLibs);
   if (!readLibs?.getProfileById) return null;
   const healthy = await isProcessComputeHealthy(id);
   if (!healthy && !preferFallback) {
@@ -483,6 +534,18 @@ export async function getProfileByIdSafe(
     const profile = await withTimeout<any>(readLibs.getProfileById(id), timeoutMs, 'getProfileByIdSafe');
     return profile?.id ? profile : null;
   } catch {
+    if (alternateReadLibs?.getProfileById) {
+      try {
+        const profile = await withTimeout<any>(
+          alternateReadLibs.getProfileById(id),
+          timeoutMs,
+          'getProfileByIdSafe:fallback'
+        );
+        if (profile?.id) return profile;
+      } catch {
+        // fall through to mark failed
+      }
+    }
     PROFILE_READ_FAIL_UNTIL.set(id, Date.now() + PROFILE_READ_FAIL_TTL_MS);
     return null;
   }
