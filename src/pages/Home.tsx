@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import {
   getTrendingTracks,
   getStreamUrl,
@@ -15,13 +15,15 @@ import {
 } from '../lib/audius';
 import type { Track } from '../context/PlayerContext';
 import { TrackCard } from '../components/TrackCard';
+import { UploadedTrackMeta } from '../components/UploadedTrackMeta';
 import { LogoSpinner } from '../components/LogoSpinner';
 import styles from './Home.module.css';
 import { useWallet } from '../context/WalletContext';
 import { usePermaweb } from '../context/PermawebContext';
 import { CreateProfileModal } from '../components/CreateProfileModal';
-import { getSelectedOrLatestProfileByWallet, setStoredProfileOverrideId } from '../lib/permaProfile';
-import { createMainnetProfile } from '../lib/mainnetProfile';
+import { getSelectedOrLatestProfileByWallet } from '../lib/permaProfile';
+import { queryPermanentUploads } from '../lib/arweaveDiscovery';
+import { uploadedTrackToPlayerTrack, type UploadedTrackRecord } from '../lib/uploadedTracks';
 
 function mapAudiusToTrack(a: AudiusTrack): Track {
   return {
@@ -37,9 +39,11 @@ function mapAudiusToTrack(a: AudiusTrack): Track {
 
 export function Home() {
   const { address, walletType } = useWallet();
-  const { libs, isReady, getWritableLibs } = usePermaweb();
+  const { libs, isReady } = usePermaweb();
   const [tracks, setTracks] = useState<Track[]>([]);
+  const [permanentTracks, setPermanentTracks] = useState<UploadedTrackRecord[]>([]);
   const [loading, setLoading] = useState(true);
+  const [permanentLoading, setPermanentLoading] = useState(true);
   const [discoverLimit, setDiscoverLimit] = useState(24);
   const [discoverLoadingMore, setDiscoverLoadingMore] = useState(false);
   const [audiusQuery, setAudiusQuery] = useState('');
@@ -54,6 +58,55 @@ export function Home() {
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [hasPermaProfile, setHasPermaProfile] = useState(false);
+
+  const discoverTracks = useMemo(() => {
+    const isFeedTestTrack = (title: string) => title.toLowerCase().includes('test');
+    const audiusArtworkByKey = new Map<string, string>();
+    for (const track of tracks) {
+      if (!track.artwork) continue;
+      audiusArtworkByKey.set(`${track.title.trim().toLowerCase()}::${track.artist.trim().toLowerCase()}`, track.artwork);
+    }
+    const merged: Array<{
+      key: string;
+      track: Track;
+      kind: 'arweave' | 'audius';
+      upload?: UploadedTrackRecord;
+    }> = [];
+    const seen = new Set<string>();
+
+    for (const upload of permanentTracks) {
+      if (isFeedTestTrack(upload.title)) continue;
+      const key = `ar:${upload.txId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const borrowedArtwork =
+        upload.artworkUrl ||
+        audiusArtworkByKey.get(`${upload.title.trim().toLowerCase()}::${upload.artist.trim().toLowerCase()}`);
+      merged.push({
+        key,
+        track: {
+          ...uploadedTrackToPlayerTrack(upload),
+          artwork: borrowedArtwork || uploadedTrackToPlayerTrack(upload).artwork,
+        },
+        kind: 'arweave',
+        upload,
+      });
+    }
+
+    for (const track of tracks) {
+      if (isFeedTestTrack(track.title)) continue;
+      const key = `au:${track.id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push({
+        key,
+        track,
+        kind: 'audius',
+      });
+    }
+
+    return merged;
+  }, [permanentTracks, tracks]);
 
   const mapAudiusTrack = (a: AudiusTrack): Track => ({
     id: a.id,
@@ -145,6 +198,7 @@ export function Home() {
     username: string;
     displayName: string;
     description: string;
+    audiusHandle?: string;
     thumbnail?: File | null;
     banner?: File | null;
     thumbnailValue?: string | null;
@@ -156,7 +210,14 @@ export function Home() {
     setCreating(true);
     setCreateError(null);
     try {
-      console.info('[profile] create start', { address });
+      console.info('[profile] create start', { address, audiusHandle: form.audiusHandle });
+      const existing = await getSelectedOrLatestProfileByWallet(libs, address);
+      if (existing?.id) {
+        console.info('[profile] existing profile found', { profileId: existing.id });
+        setCreateError('Profile already exists for this wallet. Open your profile to view it.');
+        setCreateOpen(false);
+        return;
+      }
       const args: any = {
         username: form.username.trim(),
         displayName: form.displayName.trim(),
@@ -164,40 +225,24 @@ export function Home() {
       };
       if (form.thumbnail) args.thumbnail = await fileToDataURL(form.thumbnail);
       if (form.banner) args.banner = await fileToDataURL(form.banner);
-      const writableLibs = await getWritableLibs();
-      if (!writableLibs) {
-        throw new Error('Arweave writable profile client is not ready.');
-      }
-      const created = await createMainnetProfile(writableLibs, {
-        username: args.username,
-        displayName: args.displayName,
-        description: args.description,
-        thumbnail: args.thumbnail || null,
-        banner: args.banner || null,
-      });
-      const { profileId } = created;
+      const profileId = await libs.createProfile(args);
       console.info('[profile] create success', { profileId });
-      setStoredProfileOverrideId(address, profileId);
-      setHasPermaProfile(true);
+      if (profileId && libs.updateZone) {
+        const update: Record<string, string> = {
+          Name: form.displayName.trim(),
+          Handle: form.username.trim(),
+          Bio: form.description.trim(),
+        };
+        if (form.audiusHandle) update.AudiusHandle = form.audiusHandle;
+        await libs.updateZone(update, profileId);
+        console.info('[profile] profile updated', { profileId });
+      }
       setCreateOpen(false);
     } catch (e: any) {
       console.error('[profile] create failed', e);
       const msg = String(e?.message || '');
-      const isLocalhost =
-        typeof window !== 'undefined' &&
-        /^(localhost|127\.0\.0\.1)$/i.test(window.location.hostname);
       if (msg.includes('not allowed on this SU') || (msg.includes('Process') && msg.includes('not allowed'))) {
-        setCreateError('Profile creation hit an AO network mismatch. The app is trying to create a mainnet profile through a non-mainnet scheduler unit.');
-      } else if (
-        isLocalhost &&
-        (msg.includes('Error spawning process') ||
-          msg.includes('HTTP request failed') ||
-          msg.includes('Gateway Timeout') ||
-          msg.includes('Failed to fetch'))
-      ) {
-        setCreateError('Mainnet profile creation from localhost is being blocked or timing out at the HyperBEAM transport layer. Test this same flow from a preview or production deployment instead of localhost.');
-      } else if (msg.includes('Error spawning process')) {
-        setCreateError('Mainnet profile spawning failed. This usually means the AO mainnet process constants or authority tags are mismatched.');
+        setCreateError('Permaweb profile creation is not available on this node. Try an AO mainnet-enabled environment.');
       } else {
         setCreateError(msg || 'Profile creation failed');
       }
@@ -229,12 +274,30 @@ export function Home() {
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      setPermanentLoading(true);
+      try {
+        const rows = await queryPermanentUploads({ limit: 12 });
+        if (!cancelled) setPermanentTracks(rows);
+      } catch {
+        if (!cancelled) setPermanentTracks([]);
+      } finally {
+        if (!cancelled) setPermanentLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
       if (!isReady || !libs || !address || walletType !== 'arweave') {
         setHasPermaProfile(false);
         return;
       }
       try {
-        const profile = await getSelectedOrLatestProfileByWallet(libs, address, { useOverride: true });
+        const profile = await getSelectedOrLatestProfileByWallet(libs, address);
         if (!cancelled) setHasPermaProfile(Boolean(profile?.id));
       } catch {
         if (!cancelled) setHasPermaProfile(false);
@@ -380,19 +443,35 @@ export function Home() {
       <section className={styles.hero}>
         <h1 className={styles.heroTitle}>Discover</h1>
         <p className={styles.heroSubtitle}>
-          Stream from the Open Audio Protocol. Publish forever on Arweave.
+          Stream from Audius and permanent releases on Arweave.
         </p>
       </section>
 
-      {loading ? (
+      {loading || permanentLoading ? (
         <LogoSpinner />
       ) : (
         <>
           <section className={styles.grid}>
-            {tracks.map((track) => (
+            {discoverTracks.map((item) => (
               <TrackCard
-                key={track.id}
-                track={track}
+                key={item.key}
+                track={item.track}
+                artistHref={
+                  item.kind === 'arweave' && item.upload?.walletAddress
+                    ? `/profile/${item.upload.walletAddress}`
+                    : undefined
+                }
+                showPermanentBadge={false}
+                footerContent={
+                  item.kind === 'arweave' && item.upload ? (
+                    <>
+                      <span className={styles.sourcePill}>Arweave</span>
+                      <UploadedTrackMeta track={item.upload} compact />
+                    </>
+                  ) : (
+                    <span className={styles.sourcePill}>Audius</span>
+                  )
+                }
               />
             ))}
           </section>

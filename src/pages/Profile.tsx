@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useParams } from 'react-router-dom';
 import { useWallet } from '../context/WalletContext';
 import { usePermaweb } from '../context/PermawebContext';
 import { useAudiusAuth } from '../context/AudiusAuthContext';
-import { type Track, usePlayer } from '../context/PlayerContext';
+import type { Track } from '../context/PlayerContext';
+import { TrackCard } from '../components/TrackCard';
 import { LogoSpinner } from '../components/LogoSpinner';
 import {
   getArtworkUrl,
@@ -18,6 +19,7 @@ import {
   type AudiusUser,
 } from '../lib/audius';
 import { CreateProfileModal } from '../components/CreateProfileModal';
+import { UploadedTrackMeta } from '../components/UploadedTrackMeta';
 import { type RegisteredTrackRecord, searchTracksOnAO } from '../lib/aoMusicRegistry';
 import { getRoyaltyPayoutPlan } from '../lib/aoRoyaltyEngine';
 import {
@@ -27,7 +29,6 @@ import {
   getProfileBio,
   getProfileDisplayName,
   getProfileHandle,
-  inspectProfileReadState,
   getLatestProfileByWallet,
   getProfileOptionsByWallet,
   getProfileByIdSafe,
@@ -37,8 +38,14 @@ import {
 } from '../lib/permaProfile';
 import { resolveProfileTokens, type ResolvedProfileToken } from '../lib/profileTokens';
 import { PublishModal } from '../components/PublishModal';
+import { arweaveTxDataUrl } from '../lib/arweaveDataGateway';
+import { readUploadLedger } from '../lib/uploadLedger';
+import {
+  matchUploadedTrackToAudiusTrack,
+  normalizeUploadedTrackRecord,
+  type UploadedTrackRecord,
+} from '../lib/uploadedTracks';
 import { useApi } from '@arweave-wallet-kit/react';
-import { createMainnetProfile } from '../lib/mainnetProfile';
 import styles from './Profile.module.css';
 
 type PermaProfile = {
@@ -50,19 +57,10 @@ type PermaProfile = {
   audiusHandle?: string;
   thumbnail?: string | null;
   banner?: string | null;
-  thumbnailTxId?: string | null;
-  bannerTxId?: string | null;
   assets?: any[];
 };
 
-type LocalSample = {
-  txId: string;
-  title: string;
-  artist: string;
-  permawebUrl?: string;
-  arioUrl?: string;
-  createdAt: string;
-};
+type LocalSample = UploadedTrackRecord;
 
 type ProfileOption = {
   id: string;
@@ -98,37 +96,37 @@ function fileToDataURL(file: File): Promise<string> {
   });
 }
 
-async function resolveProfileMediaValue(
-  libs: any,
-  opts: {
-    file?: File | null;
-    keepValue?: string | null;
-    remove?: boolean;
-  }
-): Promise<string> {
-  if (opts.remove) return 'None';
-  if (opts.file) {
-    const dataUrl = await fileToDataURL(opts.file);
-    return await libs.resolveTransaction(dataUrl);
-  }
-  if (opts.keepValue) return opts.keepValue;
-  return 'None';
+function uploadedSampleToTrack(sample: LocalSample): Track {
+  return {
+    id: sample.txId,
+    title: sample.title,
+    artist: sample.artist || 'Unknown artist',
+    artistId: sample.walletAddress || sample.txId,
+    artwork: sample.artworkUrl,
+    streamUrl: sample.permawebUrl || sample.arioUrl || arweaveTxDataUrl(sample.txId),
+    isPermanent: true,
+    permaTxId: sample.txId,
+    assetId: sample.assetId,
+  };
 }
 
 export function Profile() {
-  const navigate = useNavigate();
-  const profileDebug = import.meta.env.DEV && String(import.meta.env.VITE_DEBUG_PROFILE || '') === '1';
+  const profileDebug =
+    import.meta.env.DEV &&
+    (String(import.meta.env.VITE_DEBUG_PROFILE || '') === '1' ||
+      String(import.meta.env.VITE_DEBUG_PERMAWEB || '') === '1');
   const profileLog = (...args: any[]) => {
     if (profileDebug) console.info(...args);
   };
   const { address: routeProfileRef } = useParams<{ address: string }>();
   const { address: connectedAddress, walletType } = useWallet();
   const { audiusUser, login, logout, apiKeyConfigured, isLoggingIn, authError: audiusAuthError } = useAudiusAuth();
-  const { play, pause, currentTrack, isPlaying } = usePlayer();
   const arweaveApi = useApi();
   const { libs, isReady, getWritableLibs } = usePermaweb();
 
   const [profile, setProfile] = useState<PermaProfile | null>(null);
+  const profileRef = useRef<PermaProfile | null>(null);
+  profileRef.current = profile;
   const [loading, setLoading] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
@@ -162,6 +160,8 @@ export function Profile() {
   const [aoDebugLoading, setAoDebugLoading] = useState(false);
   const [aoDebugError, setAoDebugError] = useState<string | null>(null);
   const [publishTrack, setPublishTrack] = useState<Track | null>(null);
+  /** Tracks registered on AO for this wallet (any connected address merged when viewing own profile). */
+  const [aoPublishedTracks, setAoPublishedTracks] = useState<RegisteredTrackRecord[]>([]);
   const [profileTokens, setProfileTokens] = useState<ResolvedProfileToken[]>([]);
   const tokenResolveTimerRef = useRef<number | null>(null);
   const aoTokens = useMemo(
@@ -193,34 +193,18 @@ export function Profile() {
     return raw ? String(raw) : null;
   }, [normalizedProfile]);
 
-  const connectedOverrideId = useMemo(() => {
-    if (!connectedAddress) return '';
-    return getStoredProfileOverrideId(connectedAddress);
-  }, [connectedAddress]);
-
-  const routeLooksLikeOwnWallet = useMemo(() => {
-    if (!routeProfileRef || !connectedAddress) return false;
-    return connectedAddress.toLowerCase() === routeProfileRef.toLowerCase();
-  }, [connectedAddress, routeProfileRef]);
-
-  const routeMatchesConnectedOverride = useMemo(() => {
-    if (!routeProfileRef || !connectedOverrideId) return false;
-    return routeProfileRef === connectedOverrideId;
-  }, [connectedOverrideId, routeProfileRef]);
-
   const isOwn = useMemo(() => {
     if (!connectedAddress) return false;
-    if (routeLooksLikeOwnWallet) return true;
-    if (routeMatchesConnectedOverride) return true;
+    if (routeProfileRef && connectedAddress.toLowerCase() === routeProfileRef.toLowerCase()) return true;
     if (profileWalletAddress && connectedAddress.toLowerCase() === profileWalletAddress.toLowerCase()) return true;
     return false;
-  }, [connectedAddress, profileWalletAddress, routeLooksLikeOwnWallet, routeMatchesConnectedOverride]);
+  }, [connectedAddress, profileWalletAddress, routeProfileRef]);
 
   const resolvedAddress = useMemo(() => {
     if (profileWalletAddress) return profileWalletAddress;
     if (isOwn && connectedAddress) return connectedAddress;
-    return routeLooksLikeOwnWallet ? routeProfileRef || null : null;
-  }, [connectedAddress, isOwn, profileWalletAddress, routeLooksLikeOwnWallet, routeProfileRef]);
+    return routeProfileRef || null;
+  }, [connectedAddress, isOwn, profileWalletAddress, routeProfileRef]);
 
   const avatarSource = useMemo(() => {
     return getProfileAvatar(normalizedProfile);
@@ -229,19 +213,6 @@ export function Profile() {
   const bannerSource = useMemo(() => {
     return getProfileBanner(normalizedProfile);
   }, [normalizedProfile]);
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    const openEdit = () => {
-      if (walletType === 'arweave' && isOwn && normalizedProfile?.id) {
-        setEditOpen(true);
-      }
-    };
-    window.addEventListener('streamvault:open-edit-profile', openEdit as EventListener);
-    return () => {
-      window.removeEventListener('streamvault:open-edit-profile', openEdit as EventListener);
-    };
-  }, [isOwn, normalizedProfile?.id, walletType]);
 
   const profileName = useMemo(
     () => getProfileDisplayName(normalizedProfile) || 'Unnamed',
@@ -325,7 +296,18 @@ export function Profile() {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      if (!isReady || !libs || !routeProfileRef) return;
+      if (!routeProfileRef) {
+        profileLog('[profile] skip fetch: missing route :address', { isReady, hasLibs: Boolean(libs) });
+        return;
+      }
+      if (!isReady) {
+        profileLog('[profile] skip fetch: permaweb not ready yet', { routeProfileRef });
+        return;
+      }
+      if (!libs) {
+        profileLog('[profile] skip fetch: libs is null (unexpected after isReady)', { routeProfileRef });
+        return;
+      }
       const cached = PROFILE_CACHE.get(routeProfileRef);
       if (cached) {
         setProfile(cached);
@@ -335,7 +317,11 @@ export function Profile() {
       }
       setError(null);
       try {
-        profileLog('[profile] fetch start', { ref: routeProfileRef });
+        profileLog('[profile] fetch start', {
+          ref: routeProfileRef,
+          resolvedAddress: resolvedAddress?.slice(0, 12),
+          connected: connectedAddress?.slice(0, 12),
+        });
         const overrideId =
           resolvedAddress ? getStoredProfileOverrideId(resolvedAddress) : '';
         if (overrideId) {
@@ -343,49 +329,21 @@ export function Profile() {
           setProfileOverrideInput(overrideId);
         }
         let p = overrideId ? await getProfileByIdSafe(libs, overrideId) : null;
-        if (!p?.id && overrideId && resolvedAddress && typeof window !== 'undefined') {
-          try {
-            const raw = localStorage.getItem(getProfileSnapshotKey(resolvedAddress));
-            if (raw) {
-              const cached = JSON.parse(raw);
-              if (cached?.id === overrideId) p = cached;
-            }
-          } catch {
-            // ignore snapshot parse errors
-          }
-        }
         if (!p?.id) {
           const byId = await getProfileByIdSafe(libs, routeProfileRef);
           if (byId?.id) p = byId;
         }
-        if (!p?.id && resolvedAddress) {
-          p = await getSelectedOrLatestProfileByWallet(
-            libs,
-            resolvedAddress,
-            { useOverride: true }
-          );
-        }
-        if (
-          import.meta.env.DEV &&
-          profileDebug &&
-          overrideId &&
-          !p?.id
-        ) {
-          inspectProfileReadState(libs, overrideId)
-            .then((diag) => console.info('[profile:read:diag]', diag))
-            .catch((diagError) =>
-              console.info('[profile:read:diag:error]', String((diagError as any)?.message || diagError))
-            );
+        const looksLikeWalletAddress =
+          !routeProfileRef.includes('_') &&
+          !routeProfileRef.includes('-') &&
+          routeProfileRef.length === 43;
+        if (!p?.id && looksLikeWalletAddress) {
+          p = await getSelectedOrLatestProfileByWallet(libs, routeProfileRef);
         }
         profileLog('[profile] data', p);
         profileLog('[profile] fetch result', { hasProfile: Boolean(p?.id) });
         if (!cancelled) {
-          const keepExisting =
-            !p?.id &&
-            Boolean(overrideId) &&
-            Boolean(profile?.id) &&
-            String(profile?.id) === overrideId;
-          const next = keepExisting ? profile : (p || { id: null });
+          const next = p?.id ? p : profileRef.current?.id ? profileRef.current : { id: null };
           setProfile(next);
           if (next?.id) PROFILE_CACHE.set(routeProfileRef, next);
           const walletForSnapshot = inferProfileWalletAddress(next, resolvedAddress);
@@ -412,24 +370,7 @@ export function Profile() {
     return () => {
       cancelled = true;
     };
-  }, [isReady, libs, routeProfileRef, connectedAddress]);
-
-  useEffect(() => {
-    if (!(import.meta.env.DEV && profileDebug) || !libs || typeof window === 'undefined') return;
-    const target = window as any;
-    target.streamvaultProfileDebug = {
-      inspectProfile: (profileId: string) => inspectProfileReadState(libs, profileId),
-      compareProfiles: async (firstId: string, secondId: string) => ({
-        first: await inspectProfileReadState(libs, firstId),
-        second: await inspectProfileReadState(libs, secondId),
-      }),
-    };
-    return () => {
-      if (target.streamvaultProfileDebug) {
-        delete target.streamvaultProfileDebug;
-      }
-    };
-  }, [libs, profileDebug]);
+  }, [isReady, libs, routeProfileRef, connectedAddress, resolvedAddress]);
 
   useEffect(() => {
     let cancelled = false;
@@ -585,21 +526,159 @@ export function Profile() {
   );
   const hasMoreAudiusCatalog = audiusAlbums.length > 4 || audiusPlaylists.length > 4 || audiusTracks.length > 6;
 
-  useEffect(() => {
-    if (!resolvedAddress || typeof window === 'undefined') return;
+  const reloadDeviceUploads = useCallback(() => {
+    if (typeof window === 'undefined') {
+      setLocalSamples([]);
+      return;
+    }
+    if (!resolvedAddress) {
+      setLocalSamples([]);
+      return;
+    }
     try {
-      const key = `streamvault:samples:${resolvedAddress.toLowerCase()}`;
-      const stored = JSON.parse(localStorage.getItem(key) || '[]') as LocalSample[];
-      setLocalSamples(stored);
+      const addrs = new Set<string>();
+      addrs.add(resolvedAddress.toLowerCase());
+      if (connectedAddress && connectedAddress.toLowerCase() !== resolvedAddress.toLowerCase()) {
+        addrs.add(connectedAddress.toLowerCase());
+      }
+      const byTx = new Map<string, LocalSample>();
+      for (const addr of addrs) {
+        for (const key of [`streamvault:myTracks:${addr}`, `streamvault:samples:${addr}`]) {
+          const stored = JSON.parse(localStorage.getItem(key) || '[]') as unknown[];
+          for (const s of stored) {
+            const normalized = normalizeUploadedTrackRecord(s);
+            if (normalized?.txId) byTx.set(normalized.txId, normalized);
+          }
+        }
+      }
+      const ledger = readUploadLedger([resolvedAddress, connectedAddress]);
+      for (const e of ledger) {
+        const normalized = normalizeUploadedTrackRecord(e);
+        if (!normalized?.txId) continue;
+        if (e.tier === 'sample') continue;
+        byTx.set(normalized.txId, normalized);
+      }
+      setLocalSamples(
+        Array.from(byTx.values()).sort(
+          (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+        )
+      );
     } catch {
       setLocalSamples([]);
     }
-  }, [resolvedAddress]);
+  }, [resolvedAddress, connectedAddress]);
 
-  const onChainSamples = useMemo(() => {
-    const raw = normalizedProfile?.samples || normalizedProfile?.Samples || [];
-    return Array.isArray(raw) ? (raw as LocalSample[]) : [];
+  useEffect(() => {
+    reloadDeviceUploads();
+  }, [reloadDeviceUploads]);
+
+  useEffect(() => {
+    const onUpdate = () => reloadDeviceUploads();
+    window.addEventListener('streamvault:profile-updated', onUpdate);
+    window.addEventListener('streamvault:uploads-updated', onUpdate);
+    return () => {
+      window.removeEventListener('streamvault:profile-updated', onUpdate);
+      window.removeEventListener('streamvault:uploads-updated', onUpdate);
+    };
+  }, [reloadDeviceUploads]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!resolvedAddress || !isOwn) {
+      setAoPublishedTracks([]);
+      return;
+    }
+    (async () => {
+      try {
+        const addrs = [resolvedAddress];
+        if (connectedAddress && connectedAddress.toLowerCase() !== resolvedAddress.toLowerCase()) {
+          addrs.push(connectedAddress);
+        }
+        const map = new Map<string, RegisteredTrackRecord>();
+        for (const a of addrs) {
+          const rows = await searchTracksOnAO({ creator: a });
+          for (const r of rows) {
+            const k = r.assetId || r.audioTxId;
+            if (k) map.set(k, r);
+          }
+        }
+        if (!cancelled) setAoPublishedTracks(Array.from(map.values()));
+      } catch {
+        if (!cancelled) setAoPublishedTracks([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [resolvedAddress, connectedAddress, isOwn]);
+
+  /** On-chain list from profile zone (ArweaveTracks preferred; Samples kept for older profiles). */
+  const profileArweaveTracks = useMemo(() => {
+    const chunks: unknown[] = [
+      normalizedProfile?.arweaveTracks,
+      normalizedProfile?.ArweaveTracks,
+      normalizedProfile?.samples,
+      normalizedProfile?.Samples,
+    ];
+    const byTx = new Map<string, LocalSample>();
+    for (const raw of chunks) {
+      const arr = Array.isArray(raw) ? (raw as Record<string, unknown>[]) : [];
+      for (const row of arr) {
+        const normalized = normalizeUploadedTrackRecord(row);
+        if (!normalized?.txId) continue;
+        const prev = byTx.get(normalized.txId);
+        byTx.set(normalized.txId, {
+          ...prev,
+          ...normalized,
+          createdAt: normalized.createdAt || prev?.createdAt || new Date(0).toISOString(),
+          title: normalized.title || prev?.title || 'Untitled',
+          artist: normalized.artist || prev?.artist || '',
+        });
+      }
+    }
+    return Array.from(byTx.values()).sort(
+      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+    );
   }, [normalizedProfile]);
+
+  const mergedProfileUploads = useMemo(() => {
+    const byTx = new Map<string, UploadedTrackRecord>();
+    for (const row of profileArweaveTracks) byTx.set(row.txId, row);
+    for (const row of localSamples) {
+      const prev = byTx.get(row.txId);
+      byTx.set(row.txId, { ...prev, ...row });
+    }
+    for (const row of aoPublishedTracks) {
+      const prev = byTx.get(row.audioTxId);
+      byTx.set(row.audioTxId, {
+        txId: row.audioTxId,
+        title: row.tags?.Title || prev?.title || 'Untitled',
+        artist: row.tags?.Artist || prev?.artist || '',
+        assetId: row.assetId || prev?.assetId,
+        createdAt: row.createdAt ? new Date(row.createdAt * 1000).toISOString() : prev?.createdAt || new Date(0).toISOString(),
+        walletAddress: row.creator || prev?.walletAddress,
+        permawebUrl: prev?.permawebUrl || arweaveTxDataUrl(row.audioTxId),
+        udl: row.udl
+          ? {
+              licenseId: row.udl.licenseId,
+              usage: row.udl.usage,
+              aiUse: row.udl.aiUse,
+              fee: row.udl.fee,
+              currency: row.udl.currency,
+              interval: row.udl.interval,
+              attribution: row.udl.attribution,
+              uri: row.udl.uri,
+            }
+          : prev?.udl,
+        artworkUrl: prev?.artworkUrl,
+      });
+    }
+    return Array.from(byTx.values()).sort(
+      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+    );
+  }, [aoPublishedTracks, localSamples, profileArweaveTracks]);
+
+  const useUnifiedMusicGrid = visibleAudiusTracks.length > 0;
 
   const handleAddSample = async () => {
     if (!libs?.addToZone || !normalizedProfile?.id || walletType !== 'arweave') return;
@@ -608,7 +687,7 @@ export function Profile() {
     try {
       await libs.addToZone(
         {
-          path: 'Samples[]',
+          path: 'ArweaveTracks[]',
           data: {
             txId,
             title: newSampleTitle.trim() || undefined,
@@ -852,6 +931,7 @@ export function Profile() {
     username: string;
     displayName: string;
     description: string;
+    audiusHandle?: string;
     thumbnail?: File | null;
     banner?: File | null;
     thumbnailValue?: string | null;
@@ -863,7 +943,14 @@ export function Profile() {
     setCreating(true);
     setError(null);
     try {
-      profileLog('[profile] create start', { address: connectedAddress });
+      profileLog('[profile] create start', { address: connectedAddress, audiusHandle: form.audiusHandle });
+      const existing = await getSelectedOrLatestProfileByWallet(libs, connectedAddress);
+      if (existing?.id) {
+        profileLog('[profile] existing profile found', { profileId: existing.id });
+        setProfile(existing);
+        setCreateOpen(false);
+        return;
+      }
       const args: any = {
         username: form.username.trim(),
         displayName: form.displayName.trim(),
@@ -872,33 +959,19 @@ export function Profile() {
       if (form.thumbnail) args.thumbnail = await fileToDataURL(form.thumbnail);
       if (form.banner) args.banner = await fileToDataURL(form.banner);
 
-      const writableLibs = await getWritableLibs();
-      if (!writableLibs) {
-        throw new Error('Arweave writable profile client is not ready.');
-      }
-      const created = await createMainnetProfile(writableLibs, {
-        username: args.username,
-        displayName: args.displayName,
-        description: args.description,
-        thumbnail: args.thumbnail || null,
-        banner: args.banner || null,
-      });
-      const { profileId, thumbnailId, bannerId } = created;
-      const immediateThumbnail = args.thumbnail || thumbnailId || null;
-      const immediateBanner = args.banner || bannerId || null;
+      const profileId = await libs.createProfile(args);
       profileLog('[profile] create success', { profileId });
-      setStoredProfileOverrideId(connectedAddress, profileId);
-      setProfile({
-        id: profileId,
-        walletAddress: connectedAddress,
-        username: args.username,
-        displayName: args.displayName,
-        description: args.description,
-        thumbnail: immediateThumbnail,
-        banner: immediateBanner,
-        thumbnailTxId: thumbnailId,
-        bannerTxId: bannerId,
-      });
+      if (profileId && libs.updateZone) {
+        const update: Record<string, string> = {
+          Name: form.displayName.trim(),
+          Handle: form.username.trim(),
+          Bio: form.description.trim(),
+        };
+        if (form.audiusHandle) update.AudiusHandle = form.audiusHandle;
+        await libs.updateZone(update, profileId);
+        profileLog('[profile] profile updated', { profileId });
+      }
+      setProfile({ id: profileId, walletAddress: connectedAddress, username: args.username, displayName: args.displayName, description: args.description });
       if (typeof window !== 'undefined') {
         const next = {
           id: profileId,
@@ -906,10 +979,6 @@ export function Profile() {
           username: args.username,
           displayName: args.displayName,
           description: args.description,
-          thumbnail: immediateThumbnail,
-          banner: immediateBanner,
-          thumbnailTxId: thumbnailId,
-          bannerTxId: bannerId,
         };
         try {
           localStorage.setItem(getProfileSnapshotKey(connectedAddress), JSON.stringify(next));
@@ -923,23 +992,22 @@ export function Profile() {
         );
       }
       setCreateOpen(false);
-      navigate(`/profile/${profileId}`, { replace: true });
 
-      if (profileId && localSamples.length > 0 && writableLibs.addToZone) {
+      if (profileId && localSamples.length > 0 && libs.addToZone) {
         setSyncing(true);
         try {
           for (const sample of localSamples) {
-            await writableLibs.addToZone(
+            await libs.addToZone(
               {
-                path: 'Samples[]',
+                path: 'ArweaveTracks[]',
                 data: sample,
               },
               profileId
             );
           }
-          profileLog('[profile] local samples synced', { count: localSamples.length });
+          profileLog('[profile] local Arweave tracks synced', { count: localSamples.length });
         } catch (e) {
-          console.warn('[profile] Failed to sync samples', e);
+          console.warn('[profile] Failed to sync Arweave tracks', e);
         } finally {
           setSyncing(false);
         }
@@ -947,29 +1015,16 @@ export function Profile() {
 
       // Best-effort refresh (indexing may lag)
       try {
-        const fresh = await getSelectedOrLatestProfileByWallet(libs, connectedAddress, { useOverride: true });
-        if (fresh?.id) setProfile(fresh);
+        const fresh = await getSelectedOrLatestProfileByWallet(libs, connectedAddress);
+        if (fresh) setProfile(fresh);
       } catch {
         // ignore - eventual consistency
       }
     } catch (e: any) {
       console.error('[profile] create failed', e);
       const msg = String(e?.message || '');
-      const isLocalhost =
-        typeof window !== 'undefined' &&
-        /^(localhost|127\.0\.0\.1)$/i.test(window.location.hostname);
-      if (msg.includes('not allowed on this SU') || (msg.includes('Process') && msg.includes('not allowed'))) {
-        setError('Profile creation hit an AO network mismatch. The app is trying to create a mainnet profile through a non-mainnet scheduler unit.');
-      } else if (
-        isLocalhost &&
-        (msg.includes('Error spawning process') ||
-          msg.includes('HTTP request failed') ||
-          msg.includes('Gateway Timeout') ||
-          msg.includes('Failed to fetch'))
-      ) {
-        setError('Mainnet profile creation from localhost is being blocked or timing out at the HyperBEAM transport layer. Test this same flow from a preview or production deployment instead of localhost.');
-      } else if (msg.includes('Error spawning process')) {
-        setError('Mainnet profile spawning failed. This usually means the AO mainnet process constants or authority tags are mismatched.');
+      if (msg.includes('not allowed on this SU') || msg.includes('Process') && msg.includes('not allowed')) {
+        setError('Permaweb profile creation is not available on this node right now. Try again later or use an AO mainnet-enabled environment.');
       } else {
         setError(msg || 'Profile creation failed');
       }
@@ -982,6 +1037,7 @@ export function Profile() {
     username: string;
     displayName: string;
     description: string;
+    audiusHandle?: string;
     thumbnail?: File | null;
     banner?: File | null;
     thumbnailValue?: string | null;
@@ -989,67 +1045,51 @@ export function Profile() {
     removeThumbnail?: boolean;
     removeBanner?: boolean;
   }) => {
-    if (!normalizedProfile?.id || walletType !== 'arweave') return;
+    if (!libs?.updateProfile || !normalizedProfile?.id || walletType !== 'arweave') return;
     setCreating(true);
     setError(null);
     try {
-      const writableLibs = await getWritableLibs();
-      if (!writableLibs?.updateZone || !writableLibs?.resolveTransaction) {
-        throw new Error('Arweave writable profile client is not ready.');
-      }
-      const nextThumbnail = await resolveProfileMediaValue(writableLibs, {
-        file: form.thumbnail,
-        keepValue: form.removeThumbnail ? null : form.thumbnailValue || null,
-        remove: form.removeThumbnail,
-      });
-      const nextBanner = await resolveProfileMediaValue(writableLibs, {
-        file: form.banner,
-        keepValue: form.removeBanner ? null : form.bannerValue || null,
-        remove: form.removeBanner,
-      });
-      await writableLibs.updateZone(
-        {
-          Username: form.username.trim(),
-          DisplayName: form.displayName.trim(),
-          Description: form.description.trim(),
-          Thumbnail: nextThumbnail,
-          Banner: nextBanner,
-        },
-        normalizedProfile.id
-      );
-      const optimistic = {
-        ...normalizedProfile,
+      const args: any = {
         username: form.username.trim(),
         displayName: form.displayName.trim(),
         description: form.description.trim(),
-        thumbnail: form.removeThumbnail
-          ? null
-          : form.thumbnail
-            ? await fileToDataURL(form.thumbnail)
-            : (normalizedProfile as any)?.thumbnailTxId || normalizedProfile?.thumbnail || normalizedProfile?.Thumbnail || null,
-        banner: form.removeBanner
-          ? null
-          : form.banner
-            ? await fileToDataURL(form.banner)
-            : (normalizedProfile as any)?.bannerTxId || normalizedProfile?.banner || normalizedProfile?.Banner || null,
-        thumbnailTxId: nextThumbnail === 'None' ? null : nextThumbnail,
-        bannerTxId: nextBanner === 'None' ? null : nextBanner,
       };
-      setProfile(optimistic);
+      if (form.thumbnail) {
+        args.thumbnail = await fileToDataURL(form.thumbnail);
+      } else if (!form.removeThumbnail && form.thumbnailValue) {
+        args.thumbnail = form.thumbnailValue;
+      }
+      if (form.banner) {
+        args.banner = await fileToDataURL(form.banner);
+      } else if (!form.removeBanner && form.bannerValue) {
+        args.banner = form.bannerValue;
+      }
+
+      await libs.updateProfile(args, normalizedProfile.id);
+      if (libs.updateZone) {
+        await libs.updateZone(
+          {
+            Name: form.displayName.trim(),
+            Handle: form.username.trim(),
+            Bio: form.description.trim(),
+            AudiusHandle: form.audiusHandle?.trim() || '',
+          },
+          normalizedProfile.id
+        );
+      }
       const fresh =
-        (await writableLibs.getProfileById?.(normalizedProfile.id)) ||
-        (resolvedAddress ? await getSelectedOrLatestProfileByWallet(writableLibs, resolvedAddress, { useOverride: true }) : null);
+        (await libs.getProfileById?.(normalizedProfile.id)) ||
+        (resolvedAddress ? await getSelectedOrLatestProfileByWallet(libs, resolvedAddress) : null);
       if (fresh) setProfile(fresh);
-      const nextProfile = fresh || optimistic;
-      if (nextProfile && connectedAddress && typeof window !== 'undefined') {
+      if (fresh && connectedAddress && typeof window !== 'undefined') {
         try {
-          localStorage.setItem(getProfileSnapshotKey(connectedAddress), JSON.stringify(nextProfile));
+          localStorage.setItem(getProfileSnapshotKey(connectedAddress), JSON.stringify(fresh));
         } catch {
           // ignore storage failures
         }
         window.dispatchEvent(
           new CustomEvent('streamvault:profile-updated', {
-            detail: { address: connectedAddress, profile: nextProfile },
+            detail: { address: connectedAddress, profile: fresh },
           })
         );
       }
@@ -1074,37 +1114,16 @@ export function Profile() {
         ) : (
           <div className={styles.avatarPlaceholder} />
         )}
-        <div className={styles.headerContent}>
-          <div>
-            <h1 className={styles.title}>
-              {hasIdentity ? profileName : isOwn ? 'Your profile' : 'Creator profile'}
-            </h1>
-            {profileHandle && <p className={styles.subtext}>@{profileHandle}</p>}
-            {profileBio && <p className={styles.subtext}>{profileBio}</p>}
-            <p className={styles.address}>{resolvedAddress?.slice(0, 8)}…{resolvedAddress?.slice(-8)}</p>
-            {walletType && <span className={styles.walletType}>{walletType}</span>}
-          </div>
-          {walletType === 'arweave' && isOwn && (
-            <button
-              type="button"
-              className={styles.primaryBtn}
-              onClick={() => (normalizedProfile?.id ? setEditOpen(true) : setCreateOpen(true))}
-            >
-              {normalizedProfile?.id ? 'Edit profile' : 'Create profile'}
-            </button>
-          )}
+        <div>
+          <h1 className={styles.title}>
+            {hasIdentity ? profileName : isOwn ? 'Your profile' : 'Creator profile'}
+          </h1>
+          {profileHandle && <p className={styles.subtext}>@{profileHandle}</p>}
+          {profileBio && <p className={styles.subtext}>{profileBio}</p>}
+          <p className={styles.address}>{resolvedAddress?.slice(0, 8)}…{resolvedAddress?.slice(-8)}</p>
+          {walletType && <span className={styles.walletType}>{walletType}</span>}
         </div>
       </header>
-      {loading && (
-        <p className={styles.subtext} style={{ marginBottom: '16px' }}>
-          Loading profile…
-        </p>
-      )}
-      {error && (
-        <p className={styles.error} style={{ marginBottom: '16px' }}>
-          {error}
-        </p>
-      )}
       {(audiusProfile || (isOwn && audiusUser)) && (
         <section className={styles.section}>
           <div className={styles.profileCard}>
@@ -1194,49 +1213,42 @@ export function Profile() {
                   </div>
                 )}
                 {visibleAudiusTracks.length > 0 ? (
-                  <div className={styles.audiusMiniList}>
-                    {visibleAudiusTracks.map((track) => (
-                      <div key={track.id} className={styles.audiusMiniItem}>
-                        {getArtworkUrl(track) ? (
-                          <img className={styles.audiusMiniArt} src={getArtworkUrl(track) || ''} alt="" />
-                        ) : (
-                          <div className={styles.audiusMiniArtPlaceholder} />
-                        )}
-                        <div className={styles.audiusMiniMeta}>
-                          <span className={styles.mono}>{track.title}</span>
-                          <span className={styles.subtext}>@{track.user.handle}</span>
-                        </div>
-                        <button
-                          type="button"
-                          className={styles.copyBtn}
-                          onClick={() => {
-                            const playable = toPlayableTrack(track);
-                            const isCurrent = currentTrack?.id === playable.id;
-                            if (isCurrent && isPlaying) pause();
-                            else play(playable);
+                  <div className={styles.trackGrid}>
+                    {visibleAudiusTracks.map((track) => {
+                      const playable = toPlayableTrack(track);
+                      const matchedUpload = matchUploadedTrackToAudiusTrack(mergedProfileUploads, playable);
+                      return (
+                        <TrackCard
+                          key={track.id}
+                          track={{
+                            ...playable,
+                            artwork: getArtworkUrl(track) || matchedUpload?.artworkUrl || playable.artwork,
                           }}
-                        >
-                          {currentTrack?.id === track.id && isPlaying ? 'Pause' : 'Play'}
-                        </button>
-                        {isOwn && (
-                          <button
-                            type="button"
-                            className={styles.copyBtn}
-                            onClick={() => setPublishTrack(toPlayableTrack(track))}
-                          >
-                            Publish
-                          </button>
-                        )}
-                        <a
-                          className={styles.link}
-                          href={toAudiusUrl(track.permalink)}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                        >
-                          Open
-                        </a>
-                      </div>
-                    ))}
+                          showPermanentBadge={false}
+                          footerContent={
+                            matchedUpload ? (
+                              <>
+                                <span className={styles.sourcePill}>Arweave</span>
+                                <UploadedTrackMeta track={matchedUpload} compact />
+                              </>
+                            ) : (
+                              <>
+                                {isOwn && (
+                                  <button
+                                    type="button"
+                                    className={styles.copyBtn}
+                                    onClick={() => setPublishTrack(playable)}
+                                  >
+                                    Publish
+                                  </button>
+                                )}
+                                <span className={styles.sourcePill}>Audius</span>
+                              </>
+                            )
+                          }
+                        />
+                      );
+                    })}
                   </div>
                 ) : (
                   <p className={styles.subtext}>No Audius tracks found for this handle yet.</p>
@@ -1311,6 +1323,47 @@ export function Profile() {
         <a href="#/creator-tools" className={styles.link}>
           Creator tools &amp; full steps →
         </a>
+      </section>
+
+      <section className={styles.section + ' ' + styles.sectionTight}>
+        <div className={styles.sectionHeader}>
+          <h2 className={styles.sectionTitle}>Permaweb profile</h2>
+          {walletType === 'arweave' && isOwn && (
+            <button
+              type="button"
+              className={styles.primaryBtn}
+              onClick={() => (normalizedProfile?.id ? setEditOpen(true) : setCreateOpen(true))}
+            >
+              {normalizedProfile?.id ? 'Edit profile' : 'Create profile'}
+            </button>
+          )}
+        </div>
+
+        {walletType !== 'arweave' ? (
+          <p className={styles.subtext}>Connect <strong>Wander</strong> to create and manage your permaweb profile.</p>
+        ) : loading ? (
+          <LogoSpinner />
+        ) : error ? (
+          <p className={styles.error}>{error}</p>
+        ) : normalizedProfile?.id || hasIdentity ? (
+          <div className={styles.profileCard}>
+            <div>
+              <p className={styles.profileName}>{profileName}</p>
+              {profileHandle && <p className={styles.subtext}>@{profileHandle}</p>}
+              <p className={styles.subtext}>{profileBio || 'No description yet.'}</p>
+            </div>
+            <div className={styles.profileMeta}>
+              <span className={styles.mono}>Profile ID</span>
+              <span className={styles.monoValue}>
+                {normalizedProfile?.id ? `${String(normalizedProfile.id).slice(0, 12)}…` : 'Resolving…'}
+              </span>
+            </div>
+          </div>
+        ) : (
+          <p className={styles.subtext}>
+            No permaweb profile found for this wallet yet. Create one to make your identity permanent and creator-first.
+          </p>
+        )}
       </section>
 
       {normalizedProfile?.id && aoTokens.length > 0 && (
@@ -1472,45 +1525,30 @@ export function Profile() {
         </section>
       )}
 
-      {onChainSamples.length > 0 && (
+      {!useUnifiedMusicGrid && profileArweaveTracks.length > 0 && (
         <section className={styles.section + ' ' + styles.sectionTight}>
           <div className={styles.sectionHeader}>
-            <h2 className={styles.sectionTitle}>Sound bites</h2>
+            <h2 className={styles.sectionTitle}>My tracks on Arweave</h2>
           </div>
           <p className={styles.subtext}>
-            Sound bites attached to your permaweb profile. Use them in the{' '}
-            <a href="#/creator-tools" className={styles.link}>Beat generator</a> (Creator tools) to build a new track.
+            Full uploads stored on your permaweb profile zone. Use arweave.net (or a stored permaweb link) to open the data tx.
+            You can also use these clips in the{' '}
+            <a href="#/creator-tools" className={styles.link}>Beat generator</a>.
           </p>
-          <div className={styles.sampleList}>
-            {onChainSamples.map((sample) => (
-              <div key={sample.txId} className={styles.sampleItem}>
-                <div>
-                  <span className={styles.mono}>{sample.title}</span>
-                  <span className={styles.monoValue}>{sample.txId.slice(0, 12)}…</span>
-                </div>
-                <div className={styles.sampleLinks}>
-                  <a
-                    className={styles.link}
-                    href={`https://arweave.net/${sample.txId}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
-                    arweave.net
-                  </a>
-                  {sample.arioUrl && (
-                    <a className={styles.link} href={sample.arioUrl} target="_blank" rel="noopener noreferrer">
-                      ar.io
-                    </a>
-                  )}
-                  <button
-                    type="button"
-                    className={styles.copyBtn}
-                    onClick={() => handleCopyTxId(sample.txId)}
-                  >
-                    {copiedTxId === sample.txId ? 'Copied' : 'Copy tx id'}
-                  </button>
-                </div>
-              </div>
+          <div className={styles.trackGrid}>
+            {profileArweaveTracks.map((sample) => (
+              <TrackCard
+                key={sample.txId}
+                track={uploadedSampleToTrack(sample)}
+                artistHref={sample.walletAddress ? `/profile/${sample.walletAddress}` : undefined}
+                showPermanentBadge={false}
+                footerContent={
+                  <>
+                    <span className={styles.sourcePill}>Arweave</span>
+                    <UploadedTrackMeta track={sample} compact />
+                  </>
+                }
+              />
             ))}
           </div>
         </section>
@@ -1550,13 +1588,71 @@ export function Profile() {
         </section>
       )}
 
-      {onChainSamples.length === 0 && localSamples.length > 0 && (
+      {!useUnifiedMusicGrid && isOwn && aoPublishedTracks.length > 0 && (
         <section className={styles.section + ' ' + styles.sectionTight}>
           <div className={styles.sectionHeader}>
-            <h2 className={styles.sectionTitle}>Local uploads</h2>
+            <h2 className={styles.sectionTitle}>Your Arweave publishes (registry)</h2>
           </div>
           <p className={styles.subtext}>
-            Recent sound bites saved on this device. Create a permaweb profile to store them on-chain.
+            Tracks registered from StreamVault on your AO MusicRegistry (includes data-tx-only uploads).
+          </p>
+          <div className={styles.trackGrid}>
+            {aoPublishedTracks.map((t) => (
+              <TrackCard
+                key={t.assetId || t.audioTxId}
+                track={{
+                  id: t.audioTxId,
+                  title: t.tags?.Title || 'Untitled',
+                  artist: t.tags?.Artist || 'Unknown artist',
+                  artistId: t.creator,
+                  streamUrl: arweaveTxDataUrl(t.audioTxId),
+                  isPermanent: true,
+                  permaTxId: t.audioTxId,
+                  assetId: t.assetId,
+                }}
+                artistHref={t.creator ? `/profile/${t.creator}` : undefined}
+                showPermanentBadge={false}
+                footerContent={
+                  <>
+                    <span className={styles.sourcePill}>Arweave</span>
+                    <UploadedTrackMeta
+                      track={{
+                        txId: t.audioTxId,
+                        title: t.tags?.Title || 'Untitled',
+                        artist: t.tags?.Artist || '',
+                        createdAt: new Date((t.createdAt || 0) * 1000).toISOString(),
+                        udl: t.udl
+                          ? {
+                              licenseId: t.udl.licenseId,
+                              usage: t.udl.usage,
+                              aiUse: t.udl.aiUse,
+                              fee: t.udl.fee,
+                              currency: t.udl.currency,
+                              interval: t.udl.interval,
+                              attribution: t.udl.attribution,
+                              uri: t.udl.uri,
+                            }
+                          : undefined,
+                      }}
+                      compact
+                    />
+                  </>
+                }
+              />
+            ))}
+          </div>
+        </section>
+      )}
+
+      {!useUnifiedMusicGrid && localSamples.length > 0 && (
+        <section className={styles.section + ' ' + styles.sectionTight}>
+          <div className={styles.sectionHeader}>
+            <h2 className={styles.sectionTitle}>My tracks (this browser)</h2>
+          </div>
+          <p className={styles.subtext}>
+            Merges the upload ledger, local myTracks storage, and legacy keys for this profile address and your
+            currently connected wallet. After upload, use arweave.net (or a stored permaweb link)
+            below; playback may lag until gateways index the tx.
           </p>
           <button
             type="button"
@@ -1567,36 +1663,20 @@ export function Profile() {
           >
             {walletType !== 'arweave' ? 'Connect Wander' : syncing ? 'Syncing…' : 'Sync to Arweave'}
           </button>
-          <div className={styles.sampleList}>
+          <div className={styles.trackGrid}>
             {localSamples.map((sample) => (
-              <div key={sample.txId} className={styles.sampleItem}>
-                <div>
-                  <span className={styles.mono}>{sample.title}</span>
-                  <span className={styles.monoValue}>{sample.txId.slice(0, 12)}…</span>
-                </div>
-                <div className={styles.sampleLinks}>
-                  <a
-                    className={styles.link}
-                    href={`https://arweave.net/${sample.txId}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
-                    arweave.net
-                  </a>
-                  {sample.arioUrl && (
-                    <a className={styles.link} href={sample.arioUrl} target="_blank" rel="noopener noreferrer">
-                      ar.io
-                    </a>
-                  )}
-                  <button
-                    type="button"
-                    className={styles.copyBtn}
-                    onClick={() => handleCopyTxId(sample.txId)}
-                  >
-                    {copiedTxId === sample.txId ? 'Copied' : 'Copy tx id'}
-                  </button>
-                </div>
-              </div>
+              <TrackCard
+                key={sample.txId}
+                track={uploadedSampleToTrack(sample)}
+                artistHref={sample.walletAddress ? `/profile/${sample.walletAddress}` : undefined}
+                showPermanentBadge={false}
+                footerContent={
+                  <>
+                    <span className={styles.sourcePill}>Arweave</span>
+                    <UploadedTrackMeta track={sample} compact />
+                  </>
+                }
+              />
             ))}
           </div>
         </section>
@@ -1644,7 +1724,7 @@ export function Profile() {
                     {track.audioTxId && (
                       <a
                         className={styles.link}
-                        href={`https://arweave.net/${track.audioTxId}`}
+                        href={arweaveTxDataUrl(track.audioTxId)}
                         target="_blank"
                         rel="noopener noreferrer"
                       >
@@ -1709,8 +1789,8 @@ export function Profile() {
           initialDescription={profileBio || normalizedProfile?.description || ''}
           initialAvatarUrl={avatarSource}
           initialBannerUrl={bannerSource}
-          initialThumbnailValue={(normalizedProfile as any)?.thumbnailTxId || normalizedProfile?.thumbnail || normalizedProfile?.Thumbnail || null}
-          initialBannerValue={(normalizedProfile as any)?.bannerTxId || normalizedProfile?.banner || normalizedProfile?.Banner || null}
+          initialThumbnailValue={normalizedProfile?.thumbnail || normalizedProfile?.Thumbnail || null}
+          initialBannerValue={normalizedProfile?.banner || normalizedProfile?.Banner || null}
           onCreate={handleEditProfile}
         />
       )}

@@ -3,6 +3,7 @@ import { useWallet } from '../../context/WalletContext';
 import { searchTracksOnAO } from '../../lib/aoMusicRegistry';
 import { aoRecordsToTracks } from '../../lib/arweaveDiscovery';
 import { TrackCard } from '../../components/TrackCard';
+import { UploadedTrackMeta } from '../../components/UploadedTrackMeta';
 import { Link } from 'react-router-dom';
 import type { Track } from '../../context/PlayerContext';
 import { useAudiusAuth } from '../../context/AudiusAuthContext';
@@ -18,12 +19,20 @@ import {
   type AudiusTrack,
 } from '../../lib/audius';
 import { PublishModal } from '../../components/PublishModal';
+import { readUploadLedger } from '../../lib/uploadLedger';
+import {
+  matchUploadedTrackToAudiusTrack,
+  normalizeUploadedTrackRecord,
+  uploadedTrackToPlayerTrack,
+  type UploadedTrackRecord,
+} from '../../lib/uploadedTracks';
 import styles from './Vault.module.css';
 
 export function VaultLibrary() {
   const { address } = useWallet();
   const { audiusUser, login, apiKeyConfigured, isLoggingIn, authError } = useAudiusAuth();
   const [tracks, setTracks] = useState<Track[]>([]);
+  const [uploadedTracks, setUploadedTracks] = useState<UploadedTrackRecord[]>([]);
   const [audiusTracks, setAudiusTracks] = useState<Track[]>([]);
   const [audiusPlaylists, setAudiusPlaylists] = useState<AudiusPlaylist[]>([]);
   const [audiusAlbums, setAudiusAlbums] = useState<AudiusAlbum[]>([]);
@@ -32,7 +41,7 @@ export function VaultLibrary() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [publishTrack, setPublishTrack] = useState<Track | null>(null);
-  const [activeTab, setActiveTab] = useState<'tracks' | 'audius' | 'samples'>('tracks');
+  const [activeTab, setActiveTab] = useState<'tracks' | 'audius'>('tracks');
   const lastAutoOpenedAudiusHandleRef = useRef<string | null>(null);
 
   const mapAudiusTrack = (a: AudiusTrack): Track => ({
@@ -58,6 +67,7 @@ export function VaultLibrary() {
   useEffect(() => {
     if (!address) {
       setTracks([]);
+      setUploadedTracks([]);
       setLoading(false);
       return;
     }
@@ -76,6 +86,35 @@ export function VaultLibrary() {
       });
     return () => { cancelled = true; };
   }, [address]);
+
+  useEffect(() => {
+    if (!address) {
+      setUploadedTracks([]);
+      return;
+    }
+    const reload = () => {
+      const rows = readUploadLedger([address])
+        .map((row) => normalizeUploadedTrackRecord(row))
+        .filter(Boolean) as UploadedTrackRecord[];
+      setUploadedTracks(
+        rows
+          .filter((row) => row.tier !== 'sample')
+          .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      );
+    };
+    reload();
+    window.addEventListener('streamvault:profile-updated', reload);
+    window.addEventListener('streamvault:uploads-updated', reload);
+    return () => {
+      window.removeEventListener('streamvault:profile-updated', reload);
+      window.removeEventListener('streamvault:uploads-updated', reload);
+    };
+  }, [address]);
+
+  const uploadedLookup = new Map<string, UploadedTrackRecord>();
+  for (const upload of uploadedTracks) {
+    uploadedLookup.set(upload.txId, upload);
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -154,29 +193,13 @@ export function VaultLibrary() {
         </button>
         <button
           type="button"
-          className={activeTab === 'samples' ? `${styles.tab} ${styles.tabActive}` : styles.tab}
-          onClick={() => setActiveTab('samples')}
-        >
-          My samples
-        </button>
-        <button
-          type="button"
           className={activeTab === 'audius' ? `${styles.tab} ${styles.tabActive}` : styles.tab}
           onClick={() => setActiveTab('audius')}
         >
           My Audius tracks
         </button>
       </div>
-      {activeTab === 'samples' ? (
-        !address ? (
-          <p className={styles.placeholderBox}>Connect your wallet to view your on-chain samples.</p>
-        ) : (
-            <p className={styles.placeholderBox}>
-              Samples are stored on your Arweave profile. View them on your{' '}
-              <Link to={`/profile/${address}`}>Profile</Link>.
-            </p>
-        )
-      ) : activeTab === 'audius' ? (
+      {activeTab === 'audius' ? (
         <>
           {!audiusUser ? (
             <div className={styles.placeholderBox}>
@@ -250,13 +273,27 @@ export function VaultLibrary() {
                     </div>
                   )}
                   <section className={styles.grid}>
-                    {audiusTracks.map((track) => (
-                      <TrackCard
-                        key={track.id}
-                        track={track}
-                        onPublishClick={() => setPublishTrack(track)}
-                      />
-                    ))}
+                    {audiusTracks.map((track) => {
+                      const matchedUpload = matchUploadedTrackToAudiusTrack(uploadedTracks, track);
+                      return (
+                        <TrackCard
+                          key={track.id}
+                          track={track}
+                          onPublishClick={matchedUpload ? undefined : () => setPublishTrack(track)}
+                          showPermanentBadge={false}
+                          footerContent={
+                            matchedUpload ? (
+                              <>
+                                <span className={styles.sourcePill}>Arweave</span>
+                                <UploadedTrackMeta track={matchedUpload} compact />
+                              </>
+                            ) : (
+                              <span className={styles.uploadHint}>Not uploaded to Arweave yet.</span>
+                            )
+                          }
+                        />
+                      );
+                    })}
                   </section>
                 </>
               )}
@@ -293,17 +330,55 @@ export function VaultLibrary() {
           {loading ? (
             <p className={styles.loading}>Loading…</p>
           ) : (
-            <section className={styles.grid}>
-              {tracks.map((track) => (
-                <TrackCard
-                  key={track.id}
-                  track={track}
-                  artistHref={`/profile/${address}`}
-                />
-              ))}
-            </section>
+            <>
+              {uploadedTracks.length > 0 && (
+                <section className={styles.grid} style={{ marginBottom: '24px' }}>
+                  {uploadedTracks.map((track) => (
+                    <TrackCard
+                      key={track.txId}
+                      track={uploadedTrackToPlayerTrack(track)}
+                      artistHref={`/profile/${address}`}
+                      showPermanentBadge={false}
+                      footerContent={
+                        <>
+                          <span className={styles.sourcePill}>Arweave</span>
+                          <UploadedTrackMeta track={track} compact />
+                        </>
+                      }
+                    />
+                  ))}
+                </section>
+              )}
+              <section className={styles.grid}>
+                {tracks.map((track) => {
+                  const uploaded = uploadedLookup.get(track.permaTxId || track.id);
+                  const displayTrack = uploaded
+                    ? {
+                        ...track,
+                        artwork: uploaded.artworkUrl || track.artwork,
+                      }
+                    : track;
+                  return (
+                    <TrackCard
+                      key={track.id}
+                      track={displayTrack}
+                      artistHref={`/profile/${address}`}
+                      showPermanentBadge={false}
+                      footerContent={
+                        uploaded ? (
+                          <>
+                            <span className={styles.sourcePill}>Arweave</span>
+                            <UploadedTrackMeta track={uploaded} compact />
+                          </>
+                        ) : undefined
+                      }
+                    />
+                  );
+                })}
+              </section>
+            </>
           )}
-          {!loading && !error && tracks.length === 0 && (
+          {!loading && !error && tracks.length === 0 && uploadedTracks.length === 0 && (
             <p className={styles.placeholderBox}>You have not published any full tracks yet. Use Upload to publish an atomic asset.</p>
           )}
         </>

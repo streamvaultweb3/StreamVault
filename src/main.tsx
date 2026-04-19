@@ -26,6 +26,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
                 'ACCESS_ADDRESS',
                 'ACCESS_PUBLIC_KEY',
                 'SIGN_TRANSACTION',
+                'SIGNATURE',
                 'DISPATCH',
               ],
               ensurePermissions: true,

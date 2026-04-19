@@ -1,15 +1,16 @@
 /**
- * Arweave GraphQL-based discovery for StreamVault audio.
- * Queries by tags: App-Name: StreamVault, Content-Type: audio/*.
+ * Arweave GraphQL-based discovery for StreamVault audio (App-Name + audio Content-Type).
+ * New uploads also set ANS-110 `Type: music` for permaweb indexers; optional GraphQL filter:
+ * `{ name: "Type", values: ["music","audio-full","audio-sample"] }` (AND with below excludes txs with no Type).
+ * @see https://github.com/ArweaveTeam/arweave-standards/blob/master/ans/ANS-110.md
  */
 
 import type { Track } from '../context/PlayerContext';
 import type { RegisteredTrackRecord } from './aoMusicRegistry';
 import { searchTracksOnAO } from './aoMusicRegistry';
-
-const GATEWAY = 'https://arweave.net';
-
-const GQL_URL = (import.meta as any).env?.VITE_ARWEAVE_GQL_URL || 'https://arweave.net/graphql';
+import { arweaveGraphqlEndpoint, arweaveTxDataUrl } from './arweaveDataGateway';
+import type { UploadedTrackRecord } from './uploadedTracks';
+const GQL_URL = (import.meta as any).env?.VITE_ARWEAVE_GQL_URL || arweaveGraphqlEndpoint();
 
 export interface AudioTxNode {
   id: string;
@@ -20,7 +21,6 @@ export interface AudioTxNode {
 
 export interface QueryAudioOptions {
   limit?: number;
-  type?: 'audio-sample' | 'audio-full' | 'all';
   owner?: string;
   tagName?: string;
   tagValue?: string;
@@ -31,25 +31,57 @@ function getTag(node: AudioTxNode, name: string): string | undefined {
   return t?.value;
 }
 
-function nodeToTrack(node: AudioTxNode): Track {
+function nodeToUploadedTrack(node: AudioTxNode): UploadedTrackRecord {
+  const txId = node.id;
   const title = getTag(node, 'Title') || 'Untitled';
   const artist = getTag(node, 'Artist') || getTag(node, 'Artist-Address') || 'Unknown';
-  const txId = node.id;
-  const streamUrl = `${GATEWAY}/${txId}`;
+  return {
+    txId,
+    title,
+    artist,
+    permawebUrl: arweaveTxDataUrl(txId),
+    createdAt: node.block?.timestamp
+      ? new Date(node.block.timestamp * 1000).toISOString()
+      : new Date(0).toISOString(),
+    walletAddress: node.owner?.address,
+    audiusTrackId: getTag(node, 'Audius-Track-Id'),
+    contentType: getTag(node, 'Content-Type'),
+    description: getTag(node, 'Description'),
+    udl:
+      getTag(node, 'License') || getTag(node, 'License-Use') || getTag(node, 'License-AI-Use')
+        ? {
+            licenseId: getTag(node, 'License') || 'udl://music/1.0',
+            usage: (getTag(node, 'License-Use') || '')
+              .split(',')
+              .map((value) => value.trim())
+              .filter(Boolean),
+            aiUse: (getTag(node, 'License-AI-Use') || 'deny') as any,
+            fee: getTag(node, 'License-Fee') || '0',
+            currency: getTag(node, 'License-Currency') || 'MATIC',
+            interval: (getTag(node, 'License-Fee-Unit') || 'per-stream') as any,
+            attribution: getTag(node, 'License-Attribution') as any,
+            uri: getTag(node, 'License-URI'),
+          }
+        : undefined,
+  };
+}
+
+function nodeToTrack(node: AudioTxNode): Track {
+  const uploaded = nodeToUploadedTrack(node);
   const durationSec = getTag(node, 'Duration-Seconds');
   const duration = durationSec ? Math.round(Number(durationSec)) : undefined;
   const assetId = getTag(node, 'Track-Id');
   const creator = node.owner?.address || getTag(node, 'Artist-Address') || '';
 
   return {
-    id: txId,
-    title,
-    artist,
-    artistId: creator || txId,
-    streamUrl,
+    id: uploaded.txId,
+    title: uploaded.title,
+    artist: uploaded.artist,
+    artistId: creator || uploaded.txId,
+    streamUrl: uploaded.permawebUrl,
     duration,
     isPermanent: true,
-    permaTxId: txId,
+    permaTxId: uploaded.txId,
     assetId: assetId || undefined,
   };
 }
@@ -57,14 +89,27 @@ function nodeToTrack(node: AudioTxNode): Track {
 export async function queryAudioTransactions(
   options: QueryAudioOptions = {}
 ): Promise<Track[]> {
+  const nodes = await queryAudioTransactionsRaw(options);
+  let tracks = nodes.map(nodeToTrack);
+
+  if (options.owner) {
+    tracks = tracks.filter((t) => t.artistId?.toLowerCase() === options.owner?.toLowerCase());
+  }
+  return tracks;
+}
+
+export async function queryPermanentUploads(options: QueryAudioOptions = {}): Promise<UploadedTrackRecord[]> {
+  const limit = Math.min(options.limit ?? 24, 100);
+  const tracks = await queryAudioTransactionsRaw({ ...options, limit });
+  return tracks.map(nodeToUploadedTrack);
+}
+
+async function queryAudioTransactionsRaw(options: QueryAudioOptions = {}): Promise<AudioTxNode[]> {
   const limit = Math.min(options.limit ?? 50, 100);
   const tags: { name: string; values: string[] }[] = [
     { name: 'App-Name', values: ['StreamVault'] },
     { name: 'Content-Type', values: ['audio/mpeg', 'audio/wav', 'audio/ogg', 'audio/webm'] },
   ];
-  if (options.type && options.type !== 'all') {
-    tags.push({ name: 'Type', values: [options.type] });
-  }
   if (options.tagName && options.tagValue) {
     tags.push({ name: options.tagName, values: [options.tagValue] });
   }
@@ -103,13 +148,7 @@ export async function queryAudioTransactions(
   }
 
   const edges = json?.data?.transactions?.edges ?? [];
-  const nodes: AudioTxNode[] = edges.map((e: any) => e.node).filter(Boolean);
-  let tracks = nodes.map(nodeToTrack);
-
-  if (options.owner) {
-    tracks = tracks.filter((t) => t.artistId?.toLowerCase() === options.owner?.toLowerCase());
-  }
-  return tracks;
+  return edges.map((e: any) => e.node).filter(Boolean);
 }
 
 export async function queryAudioByOwner(owner: string, limit = 50): Promise<Track[]> {
@@ -128,7 +167,7 @@ export function aoRecordsToTracks(records: RegisteredTrackRecord[]): Track[] {
     title: r.tags?.Title || 'Untitled',
     artist: r.tags?.Artist || r.creator?.slice(0, 8) + '…' || 'Unknown',
     artistId: r.creator,
-    streamUrl: `${GATEWAY}/${r.audioTxId}`,
+    streamUrl: arweaveTxDataUrl(r.audioTxId),
     duration: undefined,
     isPermanent: true,
     permaTxId: r.audioTxId,
@@ -139,7 +178,7 @@ export function aoRecordsToTracks(records: RegisteredTrackRecord[]): Track[] {
 /** Fetch trending: GraphQL + AO, merge by audioTxId, sort by time (newest first). */
 export async function fetchTrendingTracks(limit = 24): Promise<Track[]> {
   const [gqlTracks, aoRecords] = await Promise.all([
-    queryAudioTransactions({ limit, type: 'all' }),
+    queryAudioTransactions({ limit }),
     searchTracksOnAO({}).catch(() => []),
   ]);
   const aoTracks = aoRecordsToTracks(aoRecords);

@@ -4,7 +4,6 @@ import { getUserById, getUserTracks, getStreamUrl, getArtworkUrl, type AudiusTra
 import type { Track } from '../context/PlayerContext';
 import { TrackCard } from '../components/TrackCard';
 import { LogoSpinner } from '../components/LogoSpinner';
-import { PublishModal } from '../components/PublishModal';
 import styles from './Artist.module.css';
 
 function mapAudiusToTrack(a: AudiusTrack): Track {
@@ -24,7 +23,6 @@ export function Artist() {
   const [user, setUser] = useState<any | null>(null);
   const [tracks, setTracks] = useState<Track[]>([]);
   const [loading, setLoading] = useState(true);
-  const [publishTrack, setPublishTrack] = useState<Track | null>(null);
 
   useEffect(() => {
     if (!id) return;
@@ -79,19 +77,10 @@ export function Artist() {
             <TrackCard
               key={track.id}
               track={track}
-              onPublishClick={() => setPublishTrack(track)}
             />
           ))}
         </div>
       </section>
-
-      {publishTrack && (
-        <PublishModal
-          track={publishTrack}
-          onClose={() => setPublishTrack(null)}
-          onSuccess={() => setPublishTrack(null)}
-        />
-      )}
     </div>
   );
 }

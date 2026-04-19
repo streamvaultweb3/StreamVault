@@ -40,3 +40,18 @@ export interface RoyaltySplit {
   token: string;
 }
 
+/** Arweave transaction tags mirroring UDL fields (used on data txs and atomic assets). */
+export function udlConfigToTags(udl: UdlConfig): { name: string; value: string }[] {
+  return [
+    { name: 'License', value: udl.licenseId },
+    ...(udl.uri ? [{ name: 'License-URI', value: udl.uri }] : []),
+    { name: 'License-Use', value: udl.usage.join(',') },
+    { name: 'License-AI-Use', value: udl.aiUse },
+    { name: 'License-Fee', value: udl.fee },
+    { name: 'License-Fee-Unit', value: udl.interval },
+    { name: 'License-Currency', value: udl.currency },
+    ...(udl.attribution ? [{ name: 'License-Attribution', value: udl.attribution }] : []),
+    ...(udl.jurisdiction ? [{ name: 'License-Jurisdiction', value: udl.jurisdiction }] : []),
+  ];
+}
+

@@ -17,6 +17,20 @@
   gap: 24px;
 }
 
+.uploadHint {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+.sourcePill {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--bg-glass-border);
+}
+
 .loading {
   font-size: var(--text-base);
   color: var(--text-muted);

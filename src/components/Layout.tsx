@@ -5,7 +5,6 @@ import { useAudiusAuth } from '../context/AudiusAuthContext';
 import { usePermaweb } from '../context/PermawebContext';
 import {
   getProfileAvatar,
-  getProfileByIdSafe,
   getProfileHandle,
   getSelectedOrLatestProfileByWallet,
   getStoredProfileOverrideId,
@@ -14,12 +13,15 @@ import { resolveProfileTokens, type ResolvedProfileToken } from '../lib/profileT
 import { createPortal } from 'react-dom';
 import { PublishModal } from './PublishModal';
 import { WanderConnectModal } from './WanderConnectModal';
+import { arweaveTxDataUrl } from '../lib/arweaveDataGateway';
+import { createFiatTopUpSession } from '../lib/publish';
+import { fetchTurboBalance, formatTurboCredits, type TurboBalance } from '../lib/turboCredits';
 import { ensureWanderConnect, openWanderConnect } from '../lib/wanderConnect';
 import { ConnectButton } from '@arweave-wallet-kit/react';
 import { setUserProperties, trackEvent } from '../lib/analytics';
 import styles from './Layout.module.css';
 
-const ARWEAVE_PERMISSIONS = ['ACCESS_ADDRESS', 'ACCESS_PUBLIC_KEY', 'SIGN_TRANSACTION', 'DISPATCH'];
+const ARWEAVE_PERMISSIONS = ['ACCESS_ADDRESS', 'ACCESS_PUBLIC_KEY', 'SIGN_TRANSACTION', 'SIGNATURE', 'DISPATCH'];
 type ConnectStage =
   | 'idle'
   | 'initializing'
@@ -54,7 +56,7 @@ function connectStageText(stage: ConnectStage): string {
 function resolveProfileImage(raw: unknown): string | null {
   if (typeof raw !== 'string' || !raw) return null;
   if (raw.startsWith('http') || raw.startsWith('data:')) return raw;
-  return `https://arweave.net/${raw}`;
+  return arweaveTxDataUrl(raw);
 }
 
 function getProfileSnapshotKey(walletAddress: string) {
@@ -109,6 +111,10 @@ export function Layout({ children }: { children: React.ReactNode }) {
   const [showWanderConnectModal, setShowWanderConnectModal] = React.useState(false);
   const [startingWanderConnect, setStartingWanderConnect] = React.useState(false);
   const [connectStage, setConnectStage] = React.useState<ConnectStage>('idle');
+  const [turboBalance, setTurboBalance] = React.useState<TurboBalance | null>(null);
+  const [turboLoading, setTurboLoading] = React.useState(false);
+  const [turboError, setTurboError] = React.useState<string | null>(null);
+  const [turboTopUpLoading, setTurboTopUpLoading] = React.useState(false);
   const connectPollIntervalRef = React.useRef<number | null>(null);
   const connectPollTimeoutRef = React.useRef<number | null>(null);
   const lastTrackedAddressRef = React.useRef<string | null>(null);
@@ -175,6 +181,21 @@ export function Layout({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
+  const refreshTurboBalance = React.useCallback(async () => {
+    if (!address || walletType !== 'arweave') return;
+    setTurboLoading(true);
+    setTurboError(null);
+    try {
+      const balance = await fetchTurboBalance(address);
+      setTurboBalance(balance);
+    } catch (e: any) {
+      setTurboBalance(null);
+      setTurboError(e?.message || 'Failed to load Turbo credits.');
+    } finally {
+      setTurboLoading(false);
+    }
+  }, [address, walletType]);
+
   const beginAddressPolling = React.useCallback((wallet: any, timeoutMs = 120000) => {
     clearAddressPolling();
     connectPollIntervalRef.current = window.setInterval(async () => {
@@ -210,6 +231,26 @@ export function Layout({ children }: { children: React.ReactNode }) {
   }, [address]);
 
   React.useEffect(() => {
+    (async () => {
+      if (!address || walletType !== 'arweave' || !showWalletMenu) {
+        return;
+      }
+      await refreshTurboBalance().catch(() => {});
+    })();
+  }, [address, walletType, showWalletMenu, refreshTurboBalance]);
+
+  React.useEffect(() => {
+    if (!address || walletType !== 'arweave') return;
+    const handler = () => {
+      refreshTurboBalance().catch(() => {});
+    };
+    window.addEventListener('streamvault:turbo-balance-refresh', handler as EventListener);
+    return () => {
+      window.removeEventListener('streamvault:turbo-balance-refresh', handler as EventListener);
+    };
+  }, [address, walletType, refreshTurboBalance]);
+
+  React.useEffect(() => {
     if (!isReady || !libs || !address) {
       setProfile(null);
       return;
@@ -229,27 +270,16 @@ export function Layout({ children }: { children: React.ReactNode }) {
       try {
         const overrideId = getStoredProfileOverrideId(address);
         let loaded: any = null;
-        if (overrideId) {
-          loaded = await getProfileByIdSafe(libs, overrideId);
-          if (!loaded?.id) {
-            loaded = null;
-            try {
-              const raw = localStorage.getItem(getProfileSnapshotKey(address));
-              if (raw) {
-                const cached = JSON.parse(raw);
-                if (cached?.id === overrideId) loaded = cached;
-              }
-            } catch {
-              // ignore snapshot parse errors
-            }
-          }
+        if (overrideId && libs.getProfileById) {
+          loaded = await libs.getProfileById(overrideId);
+          if (!loaded?.id) loaded = null;
         }
         if (!loaded) {
           loaded = await getSelectedOrLatestProfileByWallet(libs, address, { useOverride: true });
         }
         if (!cancelled) {
-          const next = loaded || { id: null };
-          setProfile(next);
+          const next = loaded?.id ? loaded : profile?.id ? profile : null;
+          if (next) setProfile(next);
           if (next?.id) {
             try {
               localStorage.setItem(getProfileSnapshotKey(address), JSON.stringify(next));
@@ -259,9 +289,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
           }
         }
       } catch {
-        if (!cancelled) {
-          setProfile(null);
-        }
+        // preserve any cached/optimistic profile if refresh fails
       } finally {
         if (!cancelled) setProfileLoading(false);
       }
@@ -269,7 +297,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [address, isReady, libs]);
+  }, [address, isReady, libs, profile]);
 
   React.useEffect(() => {
     const onProfileUpdated = (event: Event) => {
@@ -347,6 +375,25 @@ export function Layout({ children }: { children: React.ReactNode }) {
     if (typeof window === 'undefined') return;
     window.open('https://audius.co/login', '_blank', 'noopener,noreferrer');
   }, []);
+
+  const openTurboTopUp = React.useCallback(() => {
+    if (typeof window === 'undefined') return;
+    window.open('https://payment.ardrive.io/', '_blank', 'noopener,noreferrer');
+  }, []);
+
+  const openTurboCardTopUp = React.useCallback(async () => {
+    if (typeof window === 'undefined' || !address) return;
+    try {
+      setTurboTopUpLoading(true);
+      setTurboError(null);
+      const url = await createFiatTopUpSession({ amountUsd: 10, ownerAddress: address });
+      window.location.href = url;
+    } catch (e: any) {
+      setTurboError(e?.message || 'Failed to start Stripe checkout.');
+    } finally {
+      setTurboTopUpLoading(false);
+    }
+  }, [address]);
 
   const handleConnect = React.useCallback(async (type: 'arweave' | 'ethereum' | 'solana') => {
     try {
@@ -449,19 +496,45 @@ export function Layout({ children }: { children: React.ReactNode }) {
           <span className={styles.walletMenuType}>{String(normalizedProfile.id).slice(0, 14)}…</span>
         </div>
       )}
-      <div className={styles.walletMenuSection}>
-        <span className={styles.walletMenuType}>
-          No primary ArNS name found for this wallet.
-        </span>
-        <a
-          href="https://arns.app"
-          target="_blank"
-          rel="noopener noreferrer"
-          className={styles.walletMenuHintLink}
-        >
-          Register an ArNS name at arns.app
-        </a>
-      </div>
+      {walletType === 'arweave' && (
+        <div className={styles.walletMenuSection}>
+          <span className={styles.turboHeading}>Turbo credits</span>
+          <span className={styles.walletMenuType}>Use credits for uploads to Arweave. Top up with card via Stripe.</span>
+          {turboLoading ? (
+            <span className={styles.walletMenuType}>Loading Turbo credits…</span>
+          ) : turboBalance ? (
+            <>
+              <div className={styles.turboBalanceRow}>
+                <span className={styles.turboBalanceValue}>
+                  {formatTurboCredits(turboBalance.effectiveBalance)}
+                </span>
+                <div className={styles.turboActions}>
+                  <button
+                    type="button"
+                    className={styles.turboActionBtn}
+                    onClick={openTurboTopUp}
+                  >
+                    Add
+                  </button>
+                  <button
+                    type="button"
+                    className={styles.turboActionBtn}
+                    onClick={openTurboCardTopUp}
+                    disabled={turboTopUpLoading}
+                  >
+                    {turboTopUpLoading ? 'Loading…' : 'Card'}
+                  </button>
+                </div>
+              </div>
+            </>
+          ) : (
+            <>
+              <span className={styles.walletMenuType}>Turbo credits unavailable.</span>
+              {turboError && <span className={styles.walletMenuError}>{turboError}</span>}
+            </>
+          )}
+        </div>
+      )}
       <Link
         to={profileHref}
         className={styles.walletMenuAction}
@@ -469,20 +542,6 @@ export function Layout({ children }: { children: React.ReactNode }) {
       >
         Open profile
       </Link>
-      {walletType === 'arweave' && normalizedProfile?.id && (
-        <Link
-          to={profileHref}
-          className={styles.walletMenuAction}
-          onClick={() => {
-            setShowWalletMenu(false);
-            if (typeof window !== 'undefined') {
-              window.dispatchEvent(new CustomEvent('streamvault:open-edit-profile'));
-            }
-          }}
-        >
-          Edit profile
-        </Link>
-      )}
       <button
         type="button"
         className={styles.walletMenuAction}
@@ -599,8 +658,6 @@ export function Layout({ children }: { children: React.ReactNode }) {
           showBalance={false}
           showProfilePicture={false}
           profileModal={false}
-          useArNS={false}
-          useAns={false}
         >
           Arweave (Wallet Kit)
         </ConnectButton>
