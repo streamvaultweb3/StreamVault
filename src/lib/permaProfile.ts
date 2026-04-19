@@ -34,7 +34,7 @@ function getFallbackReadLibs() {
   const url =
     (import.meta.env.VITE_AO_READ_URL as string | undefined) ||
     (aoUrl.trim() || undefined) ||
-    'https://push.forward.computer';
+    'https://tee-6.forward.computer';
   const scheduler =
     (import.meta.env.VITE_AO_READ_SCHEDULER as string | undefined) ||
     'n_XZJhUnmldNFo4dhajoPZWhBXuJk-OcQr5JQ49c4Zo';
@@ -69,12 +69,12 @@ function getReadNodeUrl(): string {
     return (
       (import.meta.env.VITE_AO_READ_URL as string | undefined) ||
       (aoUrl.trim() || undefined) ||
-      'https://push.forward.computer'
+      'https://tee-6.forward.computer'
     );
   }
   return (
     (import.meta.env.VITE_AO_URL as string | undefined) ||
-    'https://push.forward.computer'
+    'https://tee-6.forward.computer'
   );
 }
 

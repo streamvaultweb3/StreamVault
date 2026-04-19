@@ -8,12 +8,11 @@ type ProfileCreateArgs = {
 };
 
 import {
+  MAINNET_AO_URL,
   MAINNET_ZONE_SOURCE,
   runMainnetSpawnDiagnostic,
   spawnProcessDirect,
 } from './aoSpawnDiagnostic';
-
-const MAINNET_AO_URL = 'https://push.forward.computer';
 
 async function sleep(ms: number) {
   await new Promise((resolve) => window.setTimeout(resolve, ms));

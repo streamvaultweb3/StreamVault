@@ -8,11 +8,11 @@
  *
  * Usage:
  *   npm run diag:ao -- --node http://localhost:8734 --process <id> --process <id2>
- *   npm run diag:ao -- --node http://localhost:8734 --fallback https://push.forward.computer --process <id>
+ *   npm run diag:ao -- --node http://localhost:8734 --fallback https://tee-6.forward.computer --process <id>
  */
 
 const DEFAULT_NODE = process.env.VITE_AO_URL || "http://localhost:8734";
-const DEFAULT_FALLBACK = process.env.VITE_AO_READ_URL || "https://push.forward.computer";
+const DEFAULT_FALLBACK = process.env.VITE_AO_READ_URL || "https://tee-6.forward.computer";
 
 function parseArgs(argv) {
   const out = {
