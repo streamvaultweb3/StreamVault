@@ -174,6 +174,14 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
     }
   };
 
+  const openTurboTopUp = () => {
+    window.open('https://turbo.ar.io/topup', '_blank', 'noopener,noreferrer');
+  };
+
+  const openTurboPricingCalculator = () => {
+    window.open('https://prices.ardrive.io/', '_blank', 'noopener,noreferrer');
+  };
+
   const buildUdlConfig = (): UdlConfig => {
     const usage =
       licenseUsePreset === 'stream'
@@ -680,8 +688,8 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
                 </label>
               )}
               {useTurbo && (
-                <div style={{ marginTop: '8px', padding: '12px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px' }}>
-                  <p className={styles.hint} style={{ margin: '0 0 8px 0' }}>
+                <div className={styles.turboPanel}>
+                  <p className={styles.turboPanelHint}>
                     Pay for Arweave uploads with Turbo credits. You can buy Turbo credits with a credit card through Stripe, then spend those credits on uploads.
                   </p>
                   <div className={styles.turboBalanceBox}>
@@ -699,12 +707,28 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
                     )}
                     {turboBalanceError && <span className={styles.turboBalanceError}>{turboBalanceError}</span>}
                   </div>
-                  <p className={styles.hint} style={{ margin: '0 0 10px 0' }}>
+                  <div className={styles.turboModalActions}>
+                    <button
+                      type="button"
+                      className={styles.turboActionBtn}
+                      onClick={openTurboTopUp}
+                    >
+                      Add
+                    </button>
+                    <button
+                      type="button"
+                      className={styles.turboActionBtn}
+                      onClick={openTurboPricingCalculator}
+                    >
+                      Size Calculator
+                    </button>
+                  </div>
+                  <p className={styles.turboPanelHint}>
                     Current publish path: <strong>Turbo credits</strong>{' '}
                     {turboToken === 'arweave' ? 'with your Arweave wallet balance/credits' : `via ${turboToken}`}.
                     Raw AR is only used when you enable the direct L1 fallback.
                   </p>
-                  <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                  <div className={styles.turboAmountRow}>
                     <span style={{ fontSize: '1rem', fontWeight: 500 }}>$</span>
                     <input
                       type="number"

@@ -227,6 +227,11 @@
   text-transform: capitalize;
 }
 
+.walletMenuSubtle {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
 .walletMenuError {
   font-size: var(--text-xs);
   color: var(--error);
@@ -281,27 +286,58 @@
   letter-spacing: 0.05em;
 }
 
+.turboHeaderLink {
+  align-self: flex-start;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: var(--accent-color);
+  font-size: 11px;
+  font-weight: var(--font-medium);
+  text-align: left;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.turboHeaderLink:hover {
+  text-decoration: underline;
+}
+
 .turboBalanceRow {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 10px;
+}
+
+.turboBalanceLabel {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
 }
 
 .turboBalanceValue {
   font-size: var(--text-base);
   font-weight: var(--font-semibold);
   color: var(--text-primary);
+  cursor: help;
+  white-space: nowrap;
 }
 
 .turboActions {
   display: flex;
   align-items: center;
+  justify-content: flex-start;
   gap: 8px;
 }
 
 .turboActionBtn {
-  padding: 6px 10px;
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 6px 0;
   border-radius: 999px;
   border: 1px solid var(--bg-glass-border);
   background: rgba(255, 255, 255, 0.03);
@@ -313,6 +349,21 @@
 
 .turboActionBtn:hover {
   background: var(--bg-hover);
+}
+
+.audiusIdentity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.audiusHandle {
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .turboStats {

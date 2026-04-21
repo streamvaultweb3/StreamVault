@@ -13,7 +13,7 @@ import { resolveProfileTokens, type ResolvedProfileToken } from '../lib/profileT
 import { createPortal } from 'react-dom';
 import { PublishModal } from './PublishModal';
 import { WanderConnectModal } from './WanderConnectModal';
-import { arweaveTxDataUrl } from '../lib/arweaveDataGateway';
+import { ARWEAVE_DATA_GATEWAY_BASE, arweaveTxDataUrl } from '../lib/arweaveDataGateway';
 import { createFiatTopUpSession } from '../lib/publish';
 import { fetchTurboBalance, formatTurboCredits, type TurboBalance } from '../lib/turboCredits';
 import { ensureWanderConnect, openWanderConnect } from '../lib/wanderConnect';
@@ -115,6 +115,8 @@ export function Layout({ children }: { children: React.ReactNode }) {
   const [turboLoading, setTurboLoading] = React.useState(false);
   const [turboError, setTurboError] = React.useState<string | null>(null);
   const [turboTopUpLoading, setTurboTopUpLoading] = React.useState(false);
+  const [arBalance, setArBalance] = React.useState<string | null>(null);
+  const [arBalanceLoading, setArBalanceLoading] = React.useState(false);
   const connectPollIntervalRef = React.useRef<number | null>(null);
   const connectPollTimeoutRef = React.useRef<number | null>(null);
   const lastTrackedAddressRef = React.useRef<string | null>(null);
@@ -147,9 +149,9 @@ export function Layout({ children }: { children: React.ReactNode }) {
   }, [normalizedProfile]);
 
   const profileHref = React.useMemo(() => {
+    if (address) return `/profile/${address}`;
     if (normalizedProfile?.id) return `/profile/${String(normalizedProfile.id)}`;
     if (cachedProfileId) return `/profile/${cachedProfileId}`;
-    if (address) return `/profile/${address}`;
     return '/';
   }, [address, cachedProfileId, normalizedProfile?.id]);
 
@@ -249,6 +251,33 @@ export function Layout({ children }: { children: React.ReactNode }) {
       window.removeEventListener('streamvault:turbo-balance-refresh', handler as EventListener);
     };
   }, [address, walletType, refreshTurboBalance]);
+
+  React.useEffect(() => {
+    if (!address || walletType !== 'arweave') {
+      setArBalance(null);
+      setArBalanceLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setArBalanceLoading(true);
+    fetch(`${ARWEAVE_DATA_GATEWAY_BASE}/wallet/${address}/balance`)
+      .then((r) => r.text())
+      .then((raw) => {
+        if (cancelled) return;
+        const winston = raw ? Number(raw) : 0;
+        const ar = Number.isFinite(winston) ? winston / 1e12 : 0;
+        setArBalance(ar.toFixed(6));
+      })
+      .catch(() => {
+        if (!cancelled) setArBalance(null);
+      })
+      .finally(() => {
+        if (!cancelled) setArBalanceLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [address, walletType]);
 
   React.useEffect(() => {
     if (!isReady || !libs || !address) {
@@ -378,7 +407,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
 
   const openTurboTopUp = React.useCallback(() => {
     if (typeof window === 'undefined') return;
-    window.open('https://payment.ardrive.io/', '_blank', 'noopener,noreferrer');
+    window.open('https://turbo.ar.io/topup', '_blank', 'noopener,noreferrer');
   }, []);
 
   const openTurboCardTopUp = React.useCallback(async () => {
@@ -394,6 +423,11 @@ export function Layout({ children }: { children: React.ReactNode }) {
       setTurboTopUpLoading(false);
     }
   }, [address]);
+
+  const openTurboPricingCalculator = React.useCallback(() => {
+    if (typeof window === 'undefined') return;
+    window.open('https://prices.ardrive.io/', '_blank', 'noopener,noreferrer');
+  }, []);
 
   const handleConnect = React.useCallback(async (type: 'arweave' | 'ethereum' | 'solana') => {
     try {
@@ -486,6 +520,11 @@ export function Layout({ children }: { children: React.ReactNode }) {
   const walletMenuContent = address ? (
     <>
       <span className={styles.walletMenuType}>{walletType}</span>
+      {walletType === 'arweave' && (
+        <span className={styles.walletMenuSubtle}>
+          {arBalanceLoading ? 'Loading AR balance…' : arBalance != null ? `${arBalance} AR L1` : 'AR balance unavailable'}
+        </span>
+      )}
       {profileLoading && <span className={styles.walletMenuType}>Loading profile…</span>}
       {connectError && <span className={styles.walletMenuError}>{connectError}</span>}
       {normalizedProfile?.id && (
@@ -499,32 +538,42 @@ export function Layout({ children }: { children: React.ReactNode }) {
       {walletType === 'arweave' && (
         <div className={styles.walletMenuSection}>
           <span className={styles.turboHeading}>Turbo credits</span>
-          <span className={styles.walletMenuType}>Use credits for uploads to Arweave. Top up with card via Stripe.</span>
+          <button
+            type="button"
+            className={styles.turboHeaderLink}
+            onClick={openTurboPricingCalculator}
+          >
+            Size Calculator
+          </button>
           {turboLoading ? (
             <span className={styles.walletMenuType}>Loading Turbo credits…</span>
           ) : turboBalance ? (
             <>
               <div className={styles.turboBalanceRow}>
-                <span className={styles.turboBalanceValue}>
+                <span className={styles.turboBalanceLabel}>Balance</span>
+                <span
+                  className={styles.turboBalanceValue}
+                  title="Turbo credits pay for Arweave uploads. Add credits directly, use Stripe checkout, or estimate upload cost with the size calculator."
+                >
                   {formatTurboCredits(turboBalance.effectiveBalance)}
                 </span>
-                <div className={styles.turboActions}>
-                  <button
-                    type="button"
-                    className={styles.turboActionBtn}
-                    onClick={openTurboTopUp}
-                  >
-                    Add
-                  </button>
-                  <button
-                    type="button"
-                    className={styles.turboActionBtn}
-                    onClick={openTurboCardTopUp}
-                    disabled={turboTopUpLoading}
-                  >
-                    {turboTopUpLoading ? 'Loading…' : 'Card'}
-                  </button>
-                </div>
+              </div>
+              <div className={styles.turboActions}>
+                <button
+                  type="button"
+                  className={styles.turboActionBtn}
+                  onClick={openTurboTopUp}
+                >
+                  Add
+                </button>
+                <button
+                  type="button"
+                  className={styles.turboActionBtn}
+                  onClick={openTurboCardTopUp}
+                  disabled={turboTopUpLoading}
+                >
+                  {turboTopUpLoading ? 'Loading…' : 'Card'}
+                </button>
               </div>
             </>
           ) : (
@@ -591,12 +640,17 @@ export function Layout({ children }: { children: React.ReactNode }) {
         </div>
       )}
       <div className={styles.walletMenuSection}>
-        <span className={styles.walletMenuType}>Audius</span>
         {!apiKeyConfigured ? (
-          <span className={styles.walletMenuType}>Missing API key</span>
+          <>
+            <span className={styles.walletMenuType}>Audius</span>
+            <span className={styles.walletMenuType}>Missing API key</span>
+          </>
         ) : audiusUser ? (
           <>
-            <span className={styles.walletMenuType}>@{audiusUser.handle}</span>
+            <div className={styles.audiusIdentity}>
+              <span className={styles.walletMenuType}>Audius</span>
+              <span className={styles.audiusHandle}>@{audiusUser.handle}</span>
+            </div>
             <button
               type="button"
               className={styles.walletMenuAction}
@@ -607,6 +661,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
           </>
         ) : (
           <>
+            <span className={styles.walletMenuType}>Audius</span>
             <button
               type="button"
               className={styles.walletMenuAction}
@@ -637,7 +692,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
           setShowWalletMenu(false);
         }}
       >
-        Disconnect
+        Disconnect Wallet
       </button>
     </>
   ) : (

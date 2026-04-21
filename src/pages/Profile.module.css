@@ -112,6 +112,21 @@
   color: var(--error);
 }
 
+.fallbackNotice {
+  margin-bottom: 16px;
+  padding: 14px 16px;
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(255, 214, 102, 0.28);
+  background: linear-gradient(135deg, rgba(255, 214, 102, 0.08), rgba(255, 255, 255, 0.03));
+}
+
+.fallbackTitle {
+  font-size: var(--text-sm);
+  font-weight: var(--font-semibold);
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+
 .profileCard {
   display: flex;
   align-items: flex-start;
@@ -128,6 +143,14 @@
   font-weight: var(--font-semibold);
   color: var(--text-primary);
   margin-bottom: 4px;
+}
+
+.profileMeta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  min-width: 0;
 }
 
 .audiusMiniWrap {

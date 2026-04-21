@@ -19,6 +19,9 @@ const LATEST_PROFILE_CACHE = new Map<string, { at: number; data: any }>();
 const LATEST_PROFILE_INFLIGHT = new Map<string, Promise<any>>();
 const LATEST_PROFILE_TTL_MS = 30 * 1000;
 let fallbackReadLibs: any | null = null;
+const DEFAULT_MAINNET_READ_URL = 'https://tee-6.forward.computer';
+const DEFAULT_MAINNET_SCHEDULER = 'n_XZJhUnmldNFo4dhajoPZWhBXuJk-OcQr5JQ49c4Zo';
+const DEFAULT_MAINNET_AUTHORITY = 'fcoN_xJeisVsPXA-trzVAuIiqO3ydLQxM-L4XbrQKzY';
 
 function shouldPreferFallbackReads(): boolean {
   const force = String(import.meta.env.VITE_AO_READ_PREFER_FALLBACK || '').trim();
@@ -34,13 +37,13 @@ function getFallbackReadLibs() {
   const url =
     (import.meta.env.VITE_AO_READ_URL as string | undefined) ||
     (aoUrl.trim() || undefined) ||
-    'https://tee-6.forward.computer';
+    DEFAULT_MAINNET_READ_URL;
   const scheduler =
     (import.meta.env.VITE_AO_READ_SCHEDULER as string | undefined) ||
-    'n_XZJhUnmldNFo4dhajoPZWhBXuJk-OcQr5JQ49c4Zo';
+    DEFAULT_MAINNET_SCHEDULER;
   const authority =
     (import.meta.env.VITE_AO_READ_AUTHORITY as string | undefined) ||
-    'YUsEnCSlxvOMxRd1qG6rkaPwMgi3xOorfDfYJoMDndA';
+    DEFAULT_MAINNET_AUTHORITY;
   const gqlUrl =
     (import.meta.env.VITE_AO_GQL_URL as string | undefined) ||
     'https://ao-search-gateway.goldsky.com/graphql';
@@ -69,12 +72,12 @@ function getReadNodeUrl(): string {
     return (
       (import.meta.env.VITE_AO_READ_URL as string | undefined) ||
       (aoUrl.trim() || undefined) ||
-      'https://tee-6.forward.computer'
+      DEFAULT_MAINNET_READ_URL
     );
   }
   return (
     (import.meta.env.VITE_AO_URL as string | undefined) ||
-    'https://tee-6.forward.computer'
+    DEFAULT_MAINNET_READ_URL
   );
 }
 
