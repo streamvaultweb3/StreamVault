@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useParams } from 'react-router-dom';
 import { useWallet } from '../context/WalletContext';
 import { usePermaweb } from '../context/PermawebContext';
 import { useAudiusAuth } from '../context/AudiusAuthContext';
@@ -125,7 +125,6 @@ export function Profile() {
     if (profileDebug) console.info(...args);
   };
   const { address: routeProfileRef } = useParams<{ address: string }>();
-  const navigate = useNavigate();
   const { address: connectedAddress, walletType } = useWallet();
   const { audiusUser, login, logout, apiKeyConfigured, isLoggingIn, authError: audiusAuthError } = useAudiusAuth();
   const arweaveApi = useApi();
@@ -246,6 +245,16 @@ export function Profile() {
       ),
     [avatarSource, bannerSource, profileHandle, profileBio, profileName]
   );
+  const walletProfileFallback = useMemo(
+    () =>
+      Boolean(
+        routeProfileRef &&
+        isLikelyArweaveAddressRef(routeProfileRef) &&
+        resolvedAddress &&
+        !normalizedProfile?.id
+      ),
+    [normalizedProfile?.id, resolvedAddress, routeProfileRef]
+  );
 
   const audiusProof = useMemo(() => {
     const raw = normalizedProfile?.audiusProof;
@@ -269,9 +278,9 @@ export function Profile() {
 
   const shareUrl = useMemo(() => {
     if (typeof window === 'undefined') return '';
-    const ref = normalizedProfile?.id || routeProfileRef || '';
+    const ref = routeProfileRef || normalizedProfile?.id || '';
     return `${window.location.origin}/#/profile/${ref}`;
-  }, [normalizedProfile?.id, routeProfileRef]);
+  }, [routeProfileRef, normalizedProfile?.id]);
 
   const toAudiusUrl = (permalink: string) =>
     permalink.startsWith('http://') || permalink.startsWith('https://')
@@ -336,13 +345,13 @@ export function Profile() {
           setProfileOverrideInput(overrideId);
         }
         let p = overrideId ? await getProfileByIdSafe(libs, overrideId) : null;
+        if (!p?.id && isLikelyArweaveAddressRef(routeProfileRef)) {
+          // Prefer owner-based resolution first so wallet-routed profiles do not depend on direct process hydration.
+          p = await getSelectedOrLatestProfileByWallet(libs, routeProfileRef, { useOverride: true });
+        }
         if (!p?.id) {
           const byId = await getProfileByIdSafe(libs, routeProfileRef);
           if (byId?.id) p = byId;
-        }
-        if (!p?.id && isLikelyArweaveAddressRef(routeProfileRef)) {
-          // Route may be wallet or a process id: by-id was tried above; if still empty, resolve via GraphQL by owner.
-          p = await getSelectedOrLatestProfileByWallet(libs, routeProfileRef, { useOverride: true });
         }
         profileLog('[profile] data', p);
         profileLog('[profile] fetch result', { hasProfile: Boolean(p?.id) });
@@ -352,16 +361,6 @@ export function Profile() {
           if (next?.id) {
             PROFILE_CACHE.set(routeProfileRef, next);
             PROFILE_CACHE.set(String(next.id), next);
-          }
-          if (
-            next?.id &&
-            walletType === 'arweave' &&
-            connectedAddress &&
-            routeProfileRef &&
-            routeProfileRef.toLowerCase() === connectedAddress.toLowerCase() &&
-            String(next.id) !== routeProfileRef
-          ) {
-            navigate(`/profile/${String(next.id)}`, { replace: true });
           }
           const walletForSnapshot = inferProfileWalletAddress(next, resolvedAddress);
           if (walletForSnapshot && typeof window !== 'undefined') {
@@ -387,7 +386,7 @@ export function Profile() {
     return () => {
       cancelled = true;
     };
-  }, [isReady, libs, routeProfileRef, connectedAddress, resolvedAddress, walletType, navigate]);
+  }, [isReady, libs, routeProfileRef, connectedAddress, resolvedAddress, walletType]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1141,6 +1140,14 @@ export function Profile() {
           {walletType && <span className={styles.walletType}>{walletType}</span>}
         </div>
       </header>
+      {walletProfileFallback && (
+        <section className={styles.fallbackNotice}>
+          <p className={styles.fallbackTitle}>Wallet profile fallback active</p>
+          <p className={styles.subtext}>
+            StreamVault is showing the wallet-based profile view while the permanent permaweb profile data is unavailable or still resolving.
+          </p>
+        </section>
+      )}
       {(audiusProfile || (isOwn && audiusUser)) && (
         <section className={styles.section}>
           <div className={styles.profileCard}>
@@ -1361,7 +1368,24 @@ export function Profile() {
         ) : loading ? (
           <LogoSpinner />
         ) : error ? (
-          <p className={styles.error}>{error}</p>
+          walletProfileFallback ? (
+            <div className={styles.profileCard}>
+              <div>
+                <p className={styles.profileName}>{profileName}</p>
+                <p className={styles.subtext}>
+                  Permanent permaweb profile data did not load, so this page is using the connected wallet identity for now.
+                </p>
+              </div>
+              <div className={styles.profileMeta}>
+                <span className={styles.mono}>Wallet route</span>
+                <span className={styles.monoValue}>
+                  {resolvedAddress ? `${String(resolvedAddress).slice(0, 12)}…` : 'Unknown'}
+                </span>
+              </div>
+            </div>
+          ) : (
+            <p className={styles.error}>{error}</p>
+          )
         ) : normalizedProfile?.id || hasIdentity ? (
           <div className={styles.profileCard}>
             <div>
@@ -1373,6 +1397,21 @@ export function Profile() {
               <span className={styles.mono}>Profile ID</span>
               <span className={styles.monoValue}>
                 {normalizedProfile?.id ? `${String(normalizedProfile.id).slice(0, 12)}…` : 'Resolving…'}
+              </span>
+            </div>
+          </div>
+        ) : walletProfileFallback ? (
+          <div className={styles.profileCard}>
+            <div>
+              <p className={styles.profileName}>{profileName}</p>
+              <p className={styles.subtext}>
+                No zone-backed permaweb profile is available right now, so StreamVault is falling back to the wallet profile view.
+              </p>
+            </div>
+            <div className={styles.profileMeta}>
+              <span className={styles.mono}>Wallet route</span>
+              <span className={styles.monoValue}>
+                {resolvedAddress ? `${String(resolvedAddress).slice(0, 12)}…` : 'Unknown'}
               </span>
             </div>
           </div>

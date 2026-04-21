@@ -149,9 +149,9 @@ export function Layout({ children }: { children: React.ReactNode }) {
   }, [normalizedProfile]);
 
   const profileHref = React.useMemo(() => {
+    if (address) return `/profile/${address}`;
     if (normalizedProfile?.id) return `/profile/${String(normalizedProfile.id)}`;
     if (cachedProfileId) return `/profile/${cachedProfileId}`;
-    if (address) return `/profile/${address}`;
     return '/';
   }, [address, cachedProfileId, normalizedProfile?.id]);
 
