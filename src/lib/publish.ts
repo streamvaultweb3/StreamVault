@@ -106,22 +106,31 @@ function describePublishError(error: unknown, context?: { useTurbo?: boolean; fr
   return raw;
 }
 
+/** Phantom and other Solana wallets often expose the adapter on `window.solana` and/or `window.phantom.solana`. */
+function getBrowserSolanaWalletAdapter(win: Window | null): any {
+  if (!win) return null;
+  const w = win as any;
+  return w.solana ?? w.phantom?.solana ?? null;
+}
+
 async function uploadWithTurbo(args: TurboUploadOptions): Promise<string> {
-  const win = typeof window !== 'undefined' ? (window as any) : null;
+  const win = typeof window !== 'undefined' ? window : null;
   const { TurboFactory, ArconnectSigner } = await import('@ardrive/turbo-sdk/web');
 
   let turbo;
   if (args.paymentToken === 'arweave') {
-    const wallet = win?.arweaveWallet;
+    const wallet = (win as any)?.arweaveWallet;
     if (!wallet) throw new Error('Wander wallet required for Turbo upload.');
     const signer = new ArconnectSigner(wallet);
     turbo = TurboFactory.authenticated({ signer });
   } else if (args.paymentToken === 'solana') {
-    const walletAdapter = win?.solana;
-    if (!walletAdapter) throw new Error('Solana wallet required for Turbo upload.');
+    const walletAdapter = getBrowserSolanaWalletAdapter(win);
+    if (!walletAdapter?.signTransaction) {
+      throw new Error('Solana wallet required for Turbo upload. Connect Phantom (or another injected Solana wallet).');
+    }
     turbo = TurboFactory.authenticated({ walletAdapter, token: 'solana' });
   } else {
-    const provider = win?.ethereum;
+    const provider = (win as any)?.ethereum;
     if (!provider) throw new Error('Ethereum wallet required for Turbo upload.');
     const { BrowserProvider } = await import('ethers');
     const { InjectedEthereumSigner } = await import('@dha-team/arbundles');

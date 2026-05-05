@@ -79,6 +79,7 @@ Output is in `dist/`. The app uses `base: './'` and **HashRouter** so it works w
 
 - `VITE_AUDIUS_APP_NAME` — Optional app name for Audius API
 - `VITE_AO` — Optional AO mode (`legacy` | `mainnet`) for permaweb-libs
+- `VITE_UDL_LICENSE_URI` — Optional UDL license document URI passed through on publish (see `publish.ts` / `PublishModal`)
 
 ## Architecture notes
 
@@ -87,7 +88,7 @@ Output is in `dist/`. The app uses `base: './'` and **HashRouter** so it works w
 - **Multi-wallet uploads** — Turbo is wired to work with multiple wallet types:
   - Arweave: Wander / ArConnect (Turbo `signer` via `ArconnectSigner`)
   - EVM (Ethereum + Base): browser wallets like MetaMask / Brave (Turbo `signer` via `InjectedEthereumSigner` over an `ethers` `BrowserProvider`)
-  - Solana: Phantom-style injected wallet (Turbo `walletAdapter` for `token: 'solana'`)
+  - Solana: Phantom (or any injected wallet on `window.solana` / `window.phantom.solana`) as Turbo `walletAdapter` with `token: 'solana'` — pay per upload in SOL without Wander credits
 - **Larger files** — Non-Turbo full tier uploads the file as a direct Arweave data tx (with size guard ~10MB) and then creates an atomic asset with metadata pointing to the file. Turbo removes this size constraint by using chunked uploads backed by Turbo Credits.
 - **Atomic assets** — `libs.createAtomicAsset()` with `assetType: 'audio'`, metadata (e.g. `audioTxId`, `streamUrl`, `artwork`, `royaltiesBps`) for future DEX/royalty integration.
 - **x402 & advanced Turbo features (roadmap)** — StreamVault’s use of `TurboFactory.authenticated()` and `uploadFile` is compatible with Turbo’s **x402 pay-per-upload**, **credit sharing**, and additional token rails (USDC on Base, ARIO, KYVE, etc). The current implementation focuses on the common flows (Turbo Credits + wallet payments); wiring in x402 funding modes and organizational credit sharing can be added with minimal changes in the `uploadWithTurbo` helper.

@@ -14,6 +14,7 @@ import { fetchL1CostForBytes, fetchTurboCostForBytes, formatArFromWinston } from
 import { appendUploadLedger } from '../lib/uploadLedger';
 import type { UdlConfig, RoyaltySplit, UdlAiUse } from '../lib/udl';
 import { udlToSummary } from '../lib/uploadedTracks';
+import { PublishPrimaryUpload } from './publish/PublishPrimaryUpload';
 import styles from './PublishModal.module.css';
 
 interface PublishModalProps {
@@ -37,7 +38,8 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
   const [royaltiesBps, setRoyaltiesBps] = useState<number>(500);
   const [useTurbo, setUseTurbo] = useState(true);
   const [turboToken, setTurboToken] = useState<'arweave' | 'ethereum' | 'base-eth' | 'solana' | 'base-usdc' | 'base-ario' | 'polygon-usdc' | 'pol'>('arweave');
-  const [showAdvancedUpload, setShowAdvancedUpload] = useState(false);
+  /** License, UDL, cover, royalties, L1 fallback, full Turbo / payment UI */
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [copiedTxId, setCopiedTxId] = useState(false);
   const [copiedAudioUrl, setCopiedAudioUrl] = useState(false);
   const [appendWarning, setAppendWarning] = useState<string | null>(null);
@@ -428,10 +430,13 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
     <div className={styles.overlay} onClick={onClose}>
       <div className={styles.modal + ' glass-strong'} onClick={(e) => e.stopPropagation()}>
         <div className={styles.header}>
-          <h2>Publish to Arweave</h2>
+          <h2>Upload to Arweave</h2>
           <button type="button" className={styles.close} onClick={onClose} aria-label="Close">×</button>
         </div>
-        <p className={styles.subtitle}>Upload the full track with Turbo-backed delivery, your license (UDL), and optional atomic asset.</p>
+        <p className={styles.subtitle}>
+          Add your audio, choose how you pay Turbo (Wander credits or Solana), then publish. Open <strong>Advanced</strong> for
+          license (UDL), cover art, royalties, credit top-up, and other chains.
+        </p>
         {status === 'uploading' && (
           <p className={styles.hint}>Uploading full audio to Arweave…</p>
         )}
@@ -476,103 +481,154 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
         </div>
 
         <div className={styles.form}>
-          <div className={styles.licenseBlock}>
-            <p className={styles.licenseTitle}>License & usage (UDL)</p>
-            <label className={styles.label}>
-              Usage
-              <select
-                className={styles.select}
-                value={licenseUsePreset}
-                onChange={(e) => setLicenseUsePreset(e.target.value as typeof licenseUsePreset)}
-              >
-                <option value="stream">Streaming only</option>
-                <option value="stream-download">Stream + personal download</option>
-                <option value="stream-download-commercial">Stream + download + commercial sync</option>
-              </select>
-            </label>
-            <label className={styles.label}>
-              AI use
-              <select
-                className={styles.select}
-                value={aiUse}
-                onChange={(e) => setAiUse(e.target.value as UdlAiUse)}
-              >
-                <option value="deny">No AI training or generation</option>
-                <option value="allow-train">Allow AI training only</option>
-                <option value="allow-generate">Allow training + generation</option>
-              </select>
-            </label>
-            <div className={styles.licenseRow}>
-              <label className={styles.label} style={{ flex: 1 }}>
-                License fee
-                <input
-                  className={styles.input}
-                  type="number"
-                  min={0}
-                  step={0.01}
-                  value={licenseFee}
-                  onChange={(e) => setLicenseFee(e.target.value)}
-                />
-              </label>
-              <label className={styles.label} style={{ flex: 1 }}>
-                Currency
-                <select
-                  className={styles.select}
-                  value={licenseCurrency}
-                  onChange={(e) => setLicenseCurrency(e.target.value)}
-                >
-                  <option value="U">$U (AO)</option>
-                  <option value="MATIC">MATIC (Polygon)</option>
-                  <option value="USDC.base">USDC (Base)</option>
-                  <option value="AR">AR (Arweave)</option>
-                </select>
-              </label>
-            </div>
-            <p className={styles.hint}>
-              Applied as Arweave tags (and atomic asset metadata when minting).
-            </p>
-          </div>
-          <>
-              <label className={styles.label}>
-                Full audio file (up to ~10MB without Turbo, larger with Turbo)
-                <input
-                  className={styles.file}
-                  type="file"
-                  accept="audio/*"
-                  onChange={(e) => setFullFile(e.target.files?.[0] || null)}
-                />
-              </label>
-              {(estimatedByteCount || costEstimateLoading || costEstimateError || turboCostEstimate !== null || l1CostEstimate !== null) && (
-                <div className={styles.turboBalanceBox}>
-                  <span className={styles.turboBalanceLabel}>Estimated upload cost</span>
-                  {estimatedByteCount ? (
-                    <span className={styles.hint} style={{ marginTop: 0 }}>
-                      Based on {(estimatedByteCount / (1024 * 1024)).toFixed(2)} MB of local audio data.
-                    </span>
-                  ) : (
-                    <span className={styles.hint} style={{ marginTop: 0 }}>
-                      Cost estimate appears after selecting a local file or generated audio. Remote Audius streams are estimated only after fetch.
-                    </span>
-                  )}
-                  {costEstimateLoading ? (
-                    <strong className={styles.turboBalanceValue}>Loading estimates…</strong>
-                  ) : (
-                    <>
-                      {turboCostEstimate !== null && (
-                        <strong className={styles.turboBalanceValue}>
-                          Turbo: {formatTurboCredits(turboCostEstimate)}
-                        </strong>
-                      )}
-                      {l1CostEstimate !== null && (
-                        <strong className={styles.turboBalanceValue}>
-                          Direct L1: {formatArFromWinston(l1CostEstimate)}
-                        </strong>
-                      )}
-                    </>
-                  )}
-                  {costEstimateError && <span className={styles.turboBalanceError}>{costEstimateError}</span>}
-                </div>
+          <PublishPrimaryUpload
+            fullFile={fullFile}
+            onFileChange={setFullFile}
+            hasGeneratedAudio={Boolean(generatedAudio)}
+            onClearGeneratedAudio={clearGeneratedAudio}
+            disabled={status === 'uploading' || status === 'confirming'}
+          />
+          <p className={styles.hint} style={{ marginTop: 0 }}>
+            Turbo is on by default (large files OK). Turn it off only as a fallback under Advanced.
+          </p>
+
+          {(estimatedByteCount || costEstimateLoading || costEstimateError || turboCostEstimate !== null || l1CostEstimate !== null) && (
+            <div className={styles.turboBalanceBox}>
+              <span className={styles.turboBalanceLabel}>Estimated upload cost</span>
+              {estimatedByteCount ? (
+                <span className={styles.hint} style={{ marginTop: 0 }}>
+                  Based on {(estimatedByteCount / (1024 * 1024)).toFixed(2)} MB of local audio data.
+                </span>
+              ) : (
+                <span className={styles.hint} style={{ marginTop: 0 }}>
+                  Select a file to estimate. Audius stream sources are sized after download.
+                </span>
               )}
+              {costEstimateLoading ? (
+                <strong className={styles.turboBalanceValue}>Loading estimates…</strong>
+              ) : (
+                <>
+                  {turboCostEstimate !== null && useTurbo && (
+                    <strong className={styles.turboBalanceValue}>
+                      Turbo: {formatTurboCredits(turboCostEstimate)}
+                    </strong>
+                  )}
+                  {l1CostEstimate !== null && !useTurbo && (
+                    <strong className={styles.turboBalanceValue}>
+                      Direct L1: {formatArFromWinston(l1CostEstimate)}
+                    </strong>
+                  )}
+                </>
+              )}
+              {costEstimateError && <span className={styles.turboBalanceError}>{costEstimateError}</span>}
+            </div>
+          )}
+
+          {useTurbo && (
+            <div className={styles.paymentQuickRow}>
+              <span className={styles.turboBalanceLabel} style={{ marginBottom: 2 }}>
+                Pay for this upload
+              </span>
+              <div className={styles.paymentChipRow}>
+                <button
+                  type="button"
+                  className={`${styles.paymentChip} ${turboToken === 'arweave' ? styles.paymentChipActive : ''}`}
+                  onClick={() => setTurboToken('arweave')}
+                >
+                  Turbo credits (Wander)
+                </button>
+                <button
+                  type="button"
+                  className={`${styles.paymentChip} ${turboToken === 'solana' ? styles.paymentChipActive : ''}`}
+                  onClick={() => setTurboToken('solana')}
+                >
+                  Solana (SOL)
+                </button>
+              </div>
+              {turboToken !== 'arweave' && turboToken !== 'solana' && (
+                <p className={styles.hint} style={{ marginTop: 0 }}>
+                  Payment: {turboToken} — change under Advanced.
+                </p>
+              )}
+              <button
+                type="button"
+                className={styles.advancedToggle}
+                onClick={() => setShowAdvanced((v) => !v)}
+              >
+                {showAdvanced ? '▼ Hide advanced' : '▸ Advanced — license, cover, balance & more networks'}
+              </button>
+            </div>
+          )}
+
+          {!useTurbo && (
+            <button
+              type="button"
+              className={styles.advancedToggle}
+              onClick={() => setShowAdvanced((v) => !v)}
+            >
+              {showAdvanced ? '▼ Hide advanced' : '▸ Advanced — L1 options & metadata'}
+            </button>
+          )}
+
+          {showAdvanced && (
+            <div className={styles.advancedBlock}>
+              <div className={styles.licenseBlock}>
+                <p className={styles.licenseTitle}>License & usage (UDL)</p>
+                <label className={styles.label}>
+                  Usage
+                  <select
+                    className={styles.select}
+                    value={licenseUsePreset}
+                    onChange={(e) => setLicenseUsePreset(e.target.value as typeof licenseUsePreset)}
+                  >
+                    <option value="stream">Streaming only</option>
+                    <option value="stream-download">Stream + personal download</option>
+                    <option value="stream-download-commercial">Stream + download + commercial sync</option>
+                  </select>
+                </label>
+                <label className={styles.label}>
+                  AI use
+                  <select
+                    className={styles.select}
+                    value={aiUse}
+                    onChange={(e) => setAiUse(e.target.value as UdlAiUse)}
+                  >
+                    <option value="deny">No AI training or generation</option>
+                    <option value="allow-train">Allow AI training only</option>
+                    <option value="allow-generate">Allow training + generation</option>
+                  </select>
+                </label>
+                <div className={styles.licenseRow}>
+                  <label className={styles.label} style={{ flex: 1 }}>
+                    License fee
+                    <input
+                      className={styles.input}
+                      type="number"
+                      min={0}
+                      step={0.01}
+                      value={licenseFee}
+                      onChange={(e) => setLicenseFee(e.target.value)}
+                    />
+                  </label>
+                  <label className={styles.label} style={{ flex: 1 }}>
+                    Currency
+                    <select
+                      className={styles.select}
+                      value={licenseCurrency}
+                      onChange={(e) => setLicenseCurrency(e.target.value)}
+                    >
+                      <option value="U">$U (AO)</option>
+                      <option value="MATIC">MATIC (Polygon)</option>
+                      <option value="USDC.base">USDC (Base)</option>
+                      <option value="AR">AR (Arweave)</option>
+                    </select>
+                  </label>
+                </div>
+                <p className={styles.hint}>
+                  Applied as Arweave tags (and atomic asset metadata when minting).
+                </p>
+              </div>
+
               {isAudiusBackedTrack && (
                 <label className={styles.checkLabel}>
                   <input
@@ -593,14 +649,7 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
                 />
                 <span>Skip atomic asset — upload audio with UDL tags only (no permaweb-libs mint).</span>
               </label>
-              {generatedAudio && !fullFile && (
-                <p className={styles.generatedCoverNote}>
-                  Using generated beat from Creator tools.{' '}
-                  <button type="button" className={styles.clearGeneratedBtn} onClick={clearGeneratedAudio}>
-                    Clear
-                  </button>
-                </p>
-              )}
+
               <label className={styles.label}>
                 Cover image (optional)
                 <input
@@ -645,32 +694,19 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
                   onChange={(e) => setRoyaltiesBps(Number(e.target.value))}
                 />
               </label>
-              <div style={{ marginTop: '8px', padding: '12px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px' }}>
-                <p className={styles.hint} style={{ margin: '0 0 8px 0' }}>
-                  Full-track uploads use Turbo by default for more reliable delivery and availability than direct L1 posting.
-                </p>
-                <label className={styles.checkLabel}>
-                  <input
-                    type="checkbox"
-                    checked={showAdvancedUpload}
-                    onChange={(e) => setShowAdvancedUpload(e.target.checked)}
-                  />
-                  <span>Show advanced upload options</span>
-                </label>
-                {showAdvancedUpload && (
-                  <label className={styles.checkLabel}>
-                    <input
-                      type="checkbox"
-                      checked={!useTurbo}
-                      onChange={(e) => setUseTurbo(!e.target.checked)}
-                    />
-                    <span>Use direct Arweave L1 upload instead of Turbo (fallback only)</span>
-                  </label>
-                )}
-              </div>
+
+              <label className={styles.checkLabel}>
+                <input
+                  type="checkbox"
+                  checked={!useTurbo}
+                  onChange={(e) => setUseTurbo(!e.target.checked)}
+                />
+                <span>Use direct Arweave L1 upload instead of Turbo (fallback only, ~10MB max)</span>
+              </label>
+
               {useTurbo && (
                 <label className={styles.label}>
-                  Upload payment
+                  Upload payment (all networks)
                   <select
                     className={styles.select}
                     value={turboToken}
@@ -690,7 +726,8 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
               {useTurbo && (
                 <div className={styles.turboPanel}>
                   <p className={styles.turboPanelHint}>
-                    Pay for Arweave uploads with Turbo credits. You can buy Turbo credits with a credit card through Stripe, then spend those credits on uploads.
+                    Pay for Arweave uploads with Turbo credits. You can buy Turbo credits with a card (Stripe), or pay
+                    per upload with Solana or EVM tokens from the menu above.
                   </p>
                   <div className={styles.turboBalanceBox}>
                     <span className={styles.turboBalanceLabel}>Current Turbo balance</span>
@@ -708,25 +745,16 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
                     {turboBalanceError && <span className={styles.turboBalanceError}>{turboBalanceError}</span>}
                   </div>
                   <div className={styles.turboModalActions}>
-                    <button
-                      type="button"
-                      className={styles.turboActionBtn}
-                      onClick={openTurboTopUp}
-                    >
+                    <button type="button" className={styles.turboActionBtn} onClick={openTurboTopUp}>
                       Add
                     </button>
-                    <button
-                      type="button"
-                      className={styles.turboActionBtn}
-                      onClick={openTurboPricingCalculator}
-                    >
+                    <button type="button" className={styles.turboActionBtn} onClick={openTurboPricingCalculator}>
                       Size Calculator
                     </button>
                   </div>
                   <p className={styles.turboPanelHint}>
-                    Current publish path: <strong>Turbo credits</strong>{' '}
-                    {turboToken === 'arweave' ? 'with your Arweave wallet balance/credits' : `via ${turboToken}`}.
-                    Raw AR is only used when you enable the direct L1 fallback.
+                    Credits path uses your Arweave wallet balance. SOL / EVM options charge the connected chain wallet per
+                    upload via Turbo.
                   </p>
                   <div className={styles.turboAmountRow}>
                     <span style={{ fontSize: '1rem', fontWeight: 500 }}>$</span>
@@ -753,13 +781,11 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
               )}
               <p className={styles.hint}>
                 {useTurbo
-                  ? 'Turbo uploads use credits instead of paying raw AR for each upload.'
-                  : 'Direct Arweave L1 upload is fallback-only and may take longer to become streamable from gateways.'}
+                  ? 'Turbo uploads bundle and speed up delivery; Wander credits or per-upload token payment both go through Turbo.'
+                  : 'Direct L1 uses raw AR from Wander and may take longer to show up on gateways.'}
               </p>
-              <p className={styles.hint}>
-                Royalties are stored in standard metadata for future distribution/DEX integration.
-              </p>
-          </>
+            </div>
+          )}
         </div>
 
         {status === 'done' && result?.success && (
@@ -779,9 +805,19 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
             </p>
             {useTurbo && (
               <p className={styles.hint}>
-                This upload used <strong>Turbo credits</strong>{' '}
-                {turboToken === 'arweave' ? 'through your connected Arweave wallet' : `via ${turboToken}`},
-                not a direct raw-AR L1 post.
+                {turboToken === 'arweave' ? (
+                  <>
+                    This upload used <strong>Turbo credits</strong> from your Arweave wallet (not a raw L1 AR post).
+                  </>
+                ) : turboToken === 'solana' ? (
+                  <>
+                    This upload was paid with <strong>SOL</strong> through Turbo via your Solana wallet.
+                  </>
+                ) : (
+                  <>
+                    This upload used Turbo with payment token <strong>{turboToken}</strong>.
+                  </>
+                )}
               </p>
             )}
             {(useTurbo ? turboCostEstimate !== null : l1CostEstimate !== null) && (
@@ -866,17 +902,17 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
           <button type="button" className={styles.cancelBtn} onClick={onClose}>Cancel</button>
           <button
             type="button"
-            className={styles.publishBtn}
+            className={`${styles.publishBtn} ${styles.publishBtnWide}`}
             onClick={handlePublish}
             disabled={status === 'uploading' || status === 'confirming' || isConnecting}
           >
             {status === 'uploading' || status === 'confirming'
-              ? 'Publishing…'
+              ? 'Uploading…'
               : status === 'done'
                 ? 'Done'
                 : !address
-                  ? 'Connect wallet to publish'
-                  : 'Publish to Arweave'}
+                  ? 'Connect wallet to upload'
+                  : 'Upload'}
           </button>
         </div>
 
