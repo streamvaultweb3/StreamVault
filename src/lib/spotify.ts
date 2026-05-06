@@ -19,7 +19,7 @@ const PKCE_VERIFIER_KEY_LOCAL = getOriginScopedKey('streamvault:spotify_pkce_ver
 const OAUTH_STATE_KEY_LOCAL = getOriginScopedKey('streamvault:spotify_oauth_state:local');
 const OAUTH_REDIRECT_URI_KEY_LOCAL = getOriginScopedKey('streamvault:spotify_oauth_redirect_uri:local');
 
-function isSpotifyDebugEnabled(): boolean {
+export function isSpotifyDebugEnabled(): boolean {
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     return typeof import.meta !== 'undefined' && String((import.meta as any)?.env?.VITE_DEBUG_SPOTIFY || '') === '1';
@@ -32,6 +32,24 @@ function spotifyDebugLog(...args: any[]) {
   if (!isSpotifyDebugEnabled()) return;
   // eslint-disable-next-line no-console
   console.debug('[spotify]', ...args);
+}
+
+const DEFAULT_SPOTIFY_SCOPES = 'user-read-private user-read-email user-library-read';
+
+/** Space- or comma-separated scopes from VITE_SPOTIFY_SCOPES, or defaults (library read for saved tracks). */
+export function getSpotifyScopesFromEnv(): string {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const raw = String((import.meta as any)?.env?.VITE_SPOTIFY_SCOPES || '').trim();
+    if (!raw) return DEFAULT_SPOTIFY_SCOPES;
+    return raw
+      .split(/[\s,]+/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .join(' ');
+  } catch {
+    return DEFAULT_SPOTIFY_SCOPES;
+  }
 }
 
 export type SpotifyAuthTokens = {
@@ -159,9 +177,16 @@ export function beginSpotifyLogin(params: {
 }): Promise<void> {
   if (typeof window === 'undefined') return Promise.resolve();
   return (async () => {
+    const clientId = String(params.clientId || '').trim();
+    if (!clientId) {
+      throw new Error('Spotify client id is missing. Set VITE_SPOTIFY_CLIENT_ID in .env.local.');
+    }
     const { verifier, challenge } = await createPkcePair();
     const state = randomString(48);
     const redirectUri = normalizeSpotifyRedirectUri(params.redirectUri) || getDefaultSpotifyRedirectUri();
+    if (!redirectUri) {
+      throw new Error('Spotify redirect URI is empty. Set VITE_SPOTIFY_REDIRECT_URI to match the Spotify app redirect exactly.');
+    }
     sessionStorage.setItem(PKCE_VERIFIER_KEY, verifier);
     sessionStorage.setItem(OAUTH_STATE_KEY, state);
     sessionStorage.setItem(OAUTH_REDIRECT_URI_KEY, redirectUri);
@@ -182,12 +207,13 @@ export function beginSpotifyLogin(params: {
     sessionStorage.removeItem(OAUTH_LAST_CODE_KEY);
     sessionStorage.removeItem(OAUTH_LAST_CODE_AT_KEY);
     const authUrl = buildSpotifyAuthorizeUrl({
-      clientId: params.clientId,
+      clientId,
       redirectUri,
       codeChallenge: challenge,
       state,
       scope: params.scope,
     });
+    // Full-page navigation to Spotify (avoid form submit / hash-only navigation).
     window.location.assign(authUrl);
   })();
 }
@@ -250,10 +276,39 @@ async function tokenRequest(body: URLSearchParams): Promise<any> {
   });
   const raw = await res.json().catch(() => ({}));
   if (!res.ok) {
+    if (isSpotifyDebugEnabled()) {
+      spotifyDebugLog('token endpoint error', { status: res.status, body: raw });
+    }
     const msg = raw?.error_description || raw?.error?.message || raw?.error || `Spotify token error (${res.status})`;
     throw new Error(String(msg));
   }
   return raw;
+}
+
+function spotifyApiFailureMessage(path: string, status: number, raw: unknown): string {
+  const o = raw as { error?: { message?: string; reason?: string; status?: number } };
+  const spotifyMsg = o?.error?.message || o?.error?.reason || '';
+  let msg = spotifyMsg || `Spotify API error (${status})`;
+  msg = `${msg} — ${path}`;
+  if (status === 403 && path.replace(/\?.*$/, '') === '/me') {
+    msg +=
+      '. Common causes: app is in Development mode (add your Spotify user under Users in the Developer Dashboard), you authorized a different Spotify account than expected, or scopes are missing user-read-private. Try an incognito window if you use multiple Spotify logins.';
+    // eslint-disable-next-line no-console
+    console.error('[spotify] /v1/me returned 403', raw);
+    try {
+      msg += ` | ${JSON.stringify(raw)}`;
+    } catch {
+      /* ignore */
+    }
+  } else if (isSpotifyDebugEnabled()) {
+    spotifyDebugLog('API error body', { path, status, body: raw });
+    try {
+      msg += ` | ${JSON.stringify(raw)}`;
+    } catch {
+      msg += ' | (unserializable error body)';
+    }
+  }
+  return msg;
 }
 
 export async function exchangeSpotifyCodeForTokens(args: {
@@ -321,8 +376,7 @@ export async function spotifyApiFetch<T>(
 
   if (!res.ok) {
     const raw = await res.json().catch(() => ({}));
-    const msg = raw?.error?.message || `Spotify API error (${res.status})`;
-    throw new Error(String(msg));
+    throw new Error(spotifyApiFailureMessage(path, res.status, raw));
   }
   return (await res.json()) as T;
 }

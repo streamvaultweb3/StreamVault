@@ -33,8 +33,8 @@ export function SpotifyCallback() {
       <section className={styles.audiusSection} style={{ marginTop: '32px' }}>
         <h2 className={styles.sectionTitle}>Spotify</h2>
         <p className={styles.sectionSubtitle}>{message}</p>
-        {canRestart ? (
-          <div style={{ marginTop: '14px', display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+        <div style={{ marginTop: '14px', display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+          {canRestart ? (
             <button
               className={styles.ctaBtn}
               onClick={() => {
@@ -45,11 +45,11 @@ export function SpotifyCallback() {
             >
               Restart Spotify connect
             </button>
-            <button className={styles.experimentalBtn} onClick={() => navigate('/', { replace: true })}>
-              Back to home
-            </button>
-          </div>
-        ) : null}
+          ) : null}
+          <button className={styles.experimentalBtn} onClick={() => navigate('/', { replace: true })}>
+            Back to home
+          </button>
+        </div>
       </section>
     </div>
   );

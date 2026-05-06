@@ -17,6 +17,7 @@ import {
   storeSpotifyTokens,
   wasSpotifyOAuthCodeProcessed,
   normalizeSpotifyRedirectUri,
+  getSpotifyScopesFromEnv,
   type SpotifyAuthTokens,
   type SpotifySavedTrackItem,
   type SpotifyUserProfile,
@@ -97,15 +98,7 @@ export function SpotifyAuthProvider({ children }: { children: React.ReactNode })
     return normalizeSpotifyRedirectUri(raw) || getDefaultSpotifyRedirectUri();
   }, []);
 
-  const scope = useMemo(
-    () =>
-      [
-        'user-read-email',
-        'user-read-private',
-        'user-library-read',
-      ].join(' '),
-    []
-  );
+  const scope = useMemo(() => getSpotifyScopesFromEnv(), []);
 
   useEffect(() => {
     const stored = loadStoredSpotifyTokens();
@@ -147,7 +140,9 @@ export function SpotifyAuthProvider({ children }: { children: React.ReactNode })
 
     refreshIfNeeded()
       .then((t) => (t?.accessToken ? hydrateProfile(t.accessToken) : null))
-      .catch(() => {
+      .catch((e: unknown) => {
+        const msg = String((e as Error)?.message || 'Spotify session could not be restored.');
+        setAuthError(msg);
         storeSpotifyTokens(null);
         setTokens(null);
         setProfile(null);
@@ -249,7 +244,17 @@ export function SpotifyAuthProvider({ children }: { children: React.ReactNode })
       if (!next.accessToken) throw new Error('Spotify returned an empty access token.');
       storeSpotifyTokens(next);
       setTokens(next);
-      await hydrateProfile(next.accessToken);
+      try {
+        await hydrateProfile(next.accessToken);
+      } catch (e: unknown) {
+        storeSpotifyTokens(null);
+        setTokens(null);
+        setProfile(null);
+        setImports([]);
+        setAuthError(String((e as Error)?.message || 'Spotify profile fetch failed.'));
+        setStatus('error');
+        throw e;
+      }
     } finally {
       clearSpotifyOAuthSession();
       finalizeSpotifyOAuthUrlCleanup();

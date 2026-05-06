@@ -381,7 +381,7 @@ export function Home() {
                   ? 'Metadata imports are ready (audio upload is still required).'
                   : spotifyConfigured
                     ? 'Import saved track metadata + album art into StreamVault.'
-                    : 'Set VITE_SPOTIFY_CLIENT_ID to enable Spotify connect.'}
+                    : 'Add VITE_SPOTIFY_CLIENT_ID in .env.local and restart the dev server.'}
               </span>
             </div>
             {spotifyProfile?.id ? (
@@ -407,6 +407,12 @@ export function Home() {
         </div>
 
         {audiusAuthError && <p className={styles.errorText}>{audiusAuthError}</p>}
+        {!spotifyConfigured && (
+          <p className={styles.errorText} role="alert">
+            Spotify connect is disabled: set <code>VITE_SPOTIFY_CLIENT_ID</code> in <code>.env.local</code> and restart{' '}
+            <code>npm run dev</code>.
+          </p>
+        )}
         {spotifyAuthError && <p className={styles.errorText}>{spotifyAuthError}</p>}
       </section>
 
