@@ -26,7 +26,13 @@ import { queryPermanentUploads } from '../lib/arweaveDiscovery';
 import { uploadedTrackToPlayerTrack, type UploadedTrackRecord } from '../lib/uploadedTracks';
 import { useAudiusAuth } from '../context/AudiusAuthContext';
 import { PublishModal } from '../components/PublishModal';
-import { useSpotifyAuth } from '../context/SpotifyAuthContext';
+import {
+  fetchSpotifyCatalogSearch,
+  spotifyTrackArtUrl,
+  spotifyTrackArtistsLabel,
+  spotifyTrackOpenUrl,
+  type SpotifyCatalogTrack,
+} from '../lib/spotify';
 
 function mapAudiusToTrack(a: AudiusTrack): Track {
   return {
@@ -51,17 +57,6 @@ export function Home() {
     isLoggingIn: isAudiusLoggingIn,
     authError: audiusAuthError,
   } = useAudiusAuth();
-  const {
-    status: spotifyStatus,
-    profile: spotifyProfile,
-    connect: spotifyConnect,
-    disconnect: spotifyDisconnect,
-    clientIdConfigured: spotifyConfigured,
-    authError: spotifyAuthError,
-    imports: spotifyImports,
-    importsLoading: spotifyImportsLoading,
-    loadImports: spotifyLoadImports,
-  } = useSpotifyAuth();
   const [tracks, setTracks] = useState<Track[]>([]);
   const [permanentTracks, setPermanentTracks] = useState<UploadedTrackRecord[]>([]);
   const [loading, setLoading] = useState(true);
@@ -81,6 +76,10 @@ export function Home() {
   const [createError, setCreateError] = useState<string | null>(null);
   const [hasPermaProfile, setHasPermaProfile] = useState(false);
   const [publishOpen, setPublishOpen] = useState(false);
+  const [spotifyQuery, setSpotifyQuery] = useState('');
+  const [spotifyResults, setSpotifyResults] = useState<SpotifyCatalogTrack[]>([]);
+  const [spotifyLoading, setSpotifyLoading] = useState(false);
+  const [spotifyError, setSpotifyError] = useState<string | null>(null);
 
   const discoverTracks = useMemo(() => {
     const isFeedTestTrack = (title: string) => title.toLowerCase().includes('test');
@@ -205,6 +204,26 @@ export function Home() {
       setAudiusError(e?.message || 'Failed to load playlist tracks.');
     } finally {
       setPlaylistLoading((prev) => ({ ...prev, [playlistId]: false }));
+    }
+  };
+
+  const handleSpotifySearch = async () => {
+    const q = spotifyQuery.trim();
+    if (!q) {
+      setSpotifyResults([]);
+      setSpotifyError(null);
+      return;
+    }
+    setSpotifyLoading(true);
+    setSpotifyError(null);
+    try {
+      const data = await fetchSpotifyCatalogSearch(q, { type: 'track' });
+      setSpotifyResults(data.tracks?.items ?? []);
+    } catch (e: unknown) {
+      setSpotifyResults([]);
+      setSpotifyError(e instanceof Error ? e.message : 'Spotify search failed.');
+    } finally {
+      setSpotifyLoading(false);
     }
   };
 
@@ -336,7 +355,8 @@ export function Home() {
       <section className={styles.hero}>
         <h1 className={styles.heroTitle}>StreamVault</h1>
         <p className={styles.heroSubtitle}>
-          Connect Audius or Spotify to import metadata, then upload audio + art to Arweave.
+          Connect Audius to import metadata, search the public Spotify catalog for references, then upload audio + art to
+          Arweave.
         </p>
         <div className={styles.heroCtas}>
           <div className={styles.audiusConnectCard}>
@@ -369,51 +389,12 @@ export function Home() {
             )}
           </div>
 
-          <div className={styles.spotifyConnectCard}>
-            <div className={styles.audiusConnectText}>
-              <strong>
-                {spotifyProfile?.id
-                  ? `Spotify connected — ${spotifyProfile.display_name || spotifyProfile.id}`
-                  : 'Connect Spotify'}
-              </strong>
-              <span>
-                {spotifyProfile?.id
-                  ? 'Metadata imports are ready (audio upload is still required).'
-                  : spotifyConfigured
-                    ? 'Import saved track metadata + album art into StreamVault.'
-                    : 'Add VITE_SPOTIFY_CLIENT_ID in .env.local and restart the dev server.'}
-              </span>
-            </div>
-            {spotifyProfile?.id ? (
-              <button type="button" className={styles.heroSecondaryBtn} onClick={spotifyDisconnect}>
-                Disconnect
-              </button>
-            ) : (
-              <button
-                type="button"
-                className={styles.heroSecondaryBtn}
-                onClick={spotifyConnect}
-                disabled={!spotifyConfigured || spotifyStatus === 'connecting'}
-                title={!spotifyConfigured ? 'Missing VITE_SPOTIFY_CLIENT_ID' : undefined}
-              >
-                {spotifyStatus === 'connecting' ? 'Connecting…' : 'Connect Spotify'}
-              </button>
-            )}
-          </div>
-
           <button type="button" className={styles.heroPrimaryBtn} onClick={() => setPublishOpen(true)}>
             Upload to Arweave
           </button>
         </div>
 
         {audiusAuthError && <p className={styles.errorText}>{audiusAuthError}</p>}
-        {!spotifyConfigured && (
-          <p className={styles.errorText} role="alert">
-            Spotify connect is disabled: set <code>VITE_SPOTIFY_CLIENT_ID</code> in <code>.env.local</code> and restart{' '}
-            <code>npm run dev</code>.
-          </p>
-        )}
-        {spotifyAuthError && <p className={styles.errorText}>{spotifyAuthError}</p>}
       </section>
 
       {loading || permanentLoading ? (
@@ -594,60 +575,62 @@ export function Home() {
       <section className={styles.audiusSection} style={{ marginTop: '32px' }}>
         <div className={styles.audiusHeader}>
           <div className={styles.audiusIntro}>
-            <h2 className={styles.sectionTitle}>Import from Spotify (metadata only)</h2>
+            <h2 className={styles.sectionTitle}>Spotify catalog search</h2>
             <p className={styles.sectionSubtitle}>
-              StreamVault can read your Spotify saved tracks for metadata + album art. You still need to upload the audio
-              file to publish to Arweave.
+              Search public tracks (app-only token on the server). Use results as reference links; audio still uploads from
+              your files to Arweave.
             </p>
           </div>
-          <div className={styles.audiusSearch} style={{ justifyContent: 'center' }}>
+          <div className={styles.audiusSearch}>
+            <input
+              className={styles.audiusInput}
+              value={spotifyQuery}
+              onChange={(e) => setSpotifyQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') void handleSpotifySearch();
+              }}
+              placeholder="Track or artist name"
+            />
             <button
               type="button"
               className={styles.audiusBtn}
-              onClick={spotifyLoadImports}
-              disabled={!spotifyProfile?.id || spotifyImportsLoading}
-              title={!spotifyProfile?.id ? 'Connect Spotify first' : undefined}
+              onClick={() => void handleSpotifySearch()}
+              disabled={spotifyLoading || !spotifyQuery.trim()}
             >
-              {spotifyImportsLoading ? 'Loading…' : 'Load saved tracks'}
+              {spotifyLoading ? 'Searching…' : 'Search'}
             </button>
           </div>
         </div>
 
-        {spotifyProfile?.id && (
-          <div className={styles.audiusProfile}>
-            <div className={styles.audiusProfileMeta}>
-              <span className={styles.audiusName}>{spotifyProfile.display_name || spotifyProfile.id}</span>
-              <span className={styles.audiusHandle}>Spotify user</span>
-            </div>
-            <div className={styles.audiusStats}>
-              {spotifyProfile.product && <span>{spotifyProfile.product}</span>}
-              {spotifyProfile.email && <span>{spotifyProfile.email}</span>}
-            </div>
-          </div>
-        )}
+        {spotifyError && <p className={styles.errorText}>{spotifyError}</p>}
 
-        {spotifyImports.length > 0 && (
+        {spotifyResults.length > 0 && (
           <div className={styles.importGrid}>
-            {spotifyImports.map((item) => (
-              <div key={item.id} className={styles.importCard}>
-                <div className={styles.importThumb}>
-                  {item.imageUrl ? <img src={item.imageUrl} alt="" loading="lazy" /> : null}
-                </div>
-                <div className={styles.importMeta}>
-                  <div className={styles.importTitle} title={item.title}>
-                    {item.title}
+            {spotifyResults.map((track) => {
+              const art = spotifyTrackArtUrl(track);
+              const openUrl = spotifyTrackOpenUrl(track);
+              return (
+                <div key={track.id} className={styles.importCard}>
+                  <div className={styles.importThumb}>
+                    {art ? <img src={art} alt="" loading="lazy" /> : null}
                   </div>
-                  <div className={styles.importSubtitle} title={item.subtitle}>
-                    {item.subtitle}
+                  <div className={styles.importMeta}>
+                    <div className={styles.importTitle} title={track.name}>
+                      {track.name}
+                    </div>
+                    <div className={styles.importSubtitle} title={track.album?.name}>
+                      {spotifyTrackArtistsLabel(track)}
+                      {track.album?.name ? ` · ${track.album.name}` : ''}
+                    </div>
+                    {openUrl && (
+                      <a className={styles.importLink} href={openUrl} target="_blank" rel="noopener noreferrer">
+                        Open in Spotify
+                      </a>
+                    )}
                   </div>
-                  {item.spotifyUrl && (
-                    <a className={styles.importLink} href={item.spotifyUrl} target="_blank" rel="noopener noreferrer">
-                      Open in Spotify
-                    </a>
-                  )}
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </section>

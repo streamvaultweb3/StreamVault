@@ -9,66 +9,54 @@ import { PermawebProvider } from './context/PermawebContext';
 import { GeneratedCoverProvider } from './context/GeneratedCoverContext';
 import { GeneratedAudioProvider } from './context/GeneratedAudioContext';
 import { AudiusAuthProvider } from './context/AudiusAuthContext';
-import { SpotifyAuthProvider } from './context/SpotifyAuthContext';
 import { ArweaveWalletKit } from '@arweave-wallet-kit/react';
 import WanderStrategy from '@arweave-wallet-kit/wander-strategy';
 import BrowserWalletStrategy from '@arweave-wallet-kit/browser-wallet-strategy';
 import AoSyncStrategy from '@vela-ventures/aosync-strategy';
 import './styles/global.css';
 
-// If Spotify redirects to a "real" path (no hash), forward into HashRouter.
-if (typeof window !== 'undefined') {
-  const isSpotifyCallbackPath = window.location.pathname.replace(/\/+$/, '') === '/spotify/callback';
-  const isAlreadyHashCallback = (window.location.hash || '').startsWith('#/spotify/callback');
-  if (isSpotifyCallbackPath && !isAlreadyHashCallback) {
-    window.location.replace(`/#/spotify/callback${window.location.search || ''}`);
-  }
-}
-
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <HashRouter>
       <ThemeProvider>
         <AudiusAuthProvider>
-          <SpotifyAuthProvider>
-            <ArweaveWalletKit
-              config={{
-                permissions: [
-                  'ACCESS_ADDRESS',
-                  'ACCESS_PUBLIC_KEY',
-                  'SIGN_TRANSACTION',
-                  'SIGNATURE',
-                  'DISPATCH',
-                ],
-                ensurePermissions: true,
-                strategies: [
-                  new WanderStrategy(),
-                  new BrowserWalletStrategy(),
-                  new AoSyncStrategy(),
-                ],
-                appInfo: {
-                  name: 'StreamVault',
-                },
-                gatewayConfig: {
-                  host: 'arweave.net',
-                  port: 443,
-                  protocol: 'https',
-                },
-              }}
-            >
-              <WalletProvider>
-                <PermawebProvider>
-                  <GeneratedCoverProvider>
-                    <GeneratedAudioProvider>
-                      <PlayerProvider>
-                        <App />
-                      </PlayerProvider>
-                    </GeneratedAudioProvider>
-                  </GeneratedCoverProvider>
-                </PermawebProvider>
-              </WalletProvider>
-            </ArweaveWalletKit>
-          </SpotifyAuthProvider>
+          <ArweaveWalletKit
+            config={{
+              permissions: [
+                'ACCESS_ADDRESS',
+                'ACCESS_PUBLIC_KEY',
+                'SIGN_TRANSACTION',
+                'SIGNATURE',
+                'DISPATCH',
+              ],
+              ensurePermissions: true,
+              strategies: [
+                new WanderStrategy(),
+                new BrowserWalletStrategy(),
+                new AoSyncStrategy(),
+              ],
+              appInfo: {
+                name: 'StreamVault',
+              },
+              gatewayConfig: {
+                host: 'arweave.net',
+                port: 443,
+                protocol: 'https',
+              },
+            }}
+          >
+            <WalletProvider>
+              <PermawebProvider>
+                <GeneratedCoverProvider>
+                  <GeneratedAudioProvider>
+                    <PlayerProvider>
+                      <App />
+                    </PlayerProvider>
+                  </GeneratedAudioProvider>
+                </GeneratedCoverProvider>
+              </PermawebProvider>
+            </WalletProvider>
+          </ArweaveWalletKit>
         </AudiusAuthProvider>
       </ThemeProvider>
     </HashRouter>

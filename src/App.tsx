@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { Routes, Route, useLocation } from 'react-router-dom';
+import { Routes, Route, useLocation, Navigate } from 'react-router-dom';
 import { Layout } from './components/Layout';
 import { Home } from './pages/Home';
 import { Artist } from './pages/Artist';
@@ -15,8 +15,6 @@ import { VaultWallet } from './pages/vault/VaultWallet';
 import { VaultRewards } from './pages/vault/VaultRewards';
 import { VaultPlaceholder } from './pages/vault/VaultPlaceholder';
 import { usePlayer } from './context/PlayerContext';
-import { SpotifyCallback } from './pages/SpotifyCallback';
-
 const GA_MEASUREMENT_ID = 'G-HBLXEBQB7H';
 
 function getPageGroup(pathname: string): string {
@@ -68,10 +66,9 @@ export default function App() {
       <RouteAnalytics />
       <Routes>
         <Route path="/" element={<Home />} />
-        <Route path="/spotify/callback" element={<SpotifyCallback />} />
         <Route path="/artist/:id" element={<Artist />} />
         <Route path="/profile/:address" element={<Profile />} />
-        <Route path="/creator-tools" element={<CreatorTools />} />
+        <Route path="/creator-tools" element={<Navigate to="/vault/creator-tools" replace />} />
         <Route path="/vault" element={<VaultLayout />}>
           <Route index element={<VaultTrending />} />
           <Route path="feed" element={<VaultPlaceholder title="Feed" message="Tracks from creators you follow. Coming soon." />} />
@@ -81,6 +78,7 @@ export default function App() {
           <Route path="wallet" element={<VaultWallet />} />
           <Route path="rewards" element={<VaultRewards />} />
           <Route path="playlists" element={<VaultPlaceholder title="Playlists" message="Create and manage playlists on Arweave. Coming soon." />} />
+          <Route path="creator-tools" element={<CreatorTools />} />
         </Route>
       </Routes>
       <NowPlayingBar />

@@ -49,6 +49,12 @@ export default defineConfig({
       'clasp-manor-constrain.ngrok-free.dev',
       '.ngrok-free.dev',
     ],
+    proxy: {
+      '/api/spotify-search': {
+        target: 'http://127.0.0.1:8787',
+        changeOrigin: true,
+      },
+    },
   },
   optimizeDeps: {
     exclude: ['rpc-websockets'],

@@ -32,6 +32,17 @@ npm run dev
 
 Open `http://localhost:5173`.
 
+### Spotify catalog search (optional)
+
+Server-side search uses `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` (see `.env.example`). For local Vite, run the tiny API helper in a **second terminal** so the dev proxy can reach it:
+
+```bash
+npm run spotify:dev-api   # terminal 1 — http://127.0.0.1:8787
+npm run dev               # terminal 2 — proxies /api/spotify-search → 8787
+```
+
+Details: [docs/spotify-catalog-search.md](docs/spotify-catalog-search.md).
+
 ## Build (perma-app ready)
 
 ```bash
@@ -51,7 +62,7 @@ Output is in `dist/`. The app uses `base: './'` and **HashRouter** so it works w
 1. Push your repo to GitHub (e.g. `https://github.com/Jharmony/StreamVault`).
 2. Go to [vercel.com](https://vercel.com) → **Add New Project** → **Import** your GitHub repo.
 3. Leave defaults (Vite is auto-detected; build: `npm run build`, output: `dist`). Or use the included `vercel.json`.
-4. Add environment variables if needed (e.g. `VITE_AUDIUS_API_KEY`, `VITE_AO`) in **Project → Settings → Environment Variables**.
+4. Add environment variables if needed (e.g. `VITE_AUDIUS_API_KEY`, `VITE_AO`, and for Spotify search `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET`) in **Project → Settings → Environment Variables**.
 5. **Deploy**. Your site will be at `https://your-project.vercel.app`. Production deploys run on every push to `main` (or the branch you set as Production).
 
 ## Deploy to Arweave (perma-app)
@@ -80,6 +91,7 @@ Output is in `dist/`. The app uses `base: './'` and **HashRouter** so it works w
 - `VITE_AUDIUS_APP_NAME` — Optional app name for Audius API
 - `VITE_AO` — Optional AO mode (`legacy` | `mainnet`) for permaweb-libs
 - `VITE_UDL_LICENSE_URI` — Optional UDL license document URI passed through on publish (see `publish.ts` / `PublishModal`)
+- `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` — **Server only** (no `VITE_` prefix). Used by `api/spotify-search` for public catalog search on Vercel and by `npm run spotify:dev-api` locally. See [docs/spotify-catalog-search.md](docs/spotify-catalog-search.md).
 
 ## Architecture notes
 
