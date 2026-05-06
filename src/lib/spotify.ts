@@ -274,39 +274,63 @@ async function tokenRequest(body: URLSearchParams): Promise<any> {
     },
     body,
   });
-  const raw = await res.json().catch(() => ({}));
+  const rawText = await res.text();
+  let raw: Record<string, unknown> | null = null;
+  if (rawText.trim()) {
+    try {
+      raw = JSON.parse(rawText) as Record<string, unknown>;
+    } catch {
+      raw = null;
+    }
+  }
   if (!res.ok) {
     if (isSpotifyDebugEnabled()) {
-      spotifyDebugLog('token endpoint error', { status: res.status, body: raw });
+      const wwwAuth = res.headers.get('www-authenticate');
+      if (wwwAuth) spotifyDebugLog('token WWW-Authenticate', wwwAuth);
+      spotifyDebugLog('token endpoint error', { status: res.status, bodyText: rawText });
     }
-    const msg = raw?.error_description || raw?.error?.message || raw?.error || `Spotify token error (${res.status})`;
-    throw new Error(String(msg));
+    const errObj = raw?.error;
+    const msg =
+      (raw?.error_description as string | undefined) ||
+      (typeof errObj === 'object' && errObj && 'message' in errObj
+        ? String((errObj as { message?: string }).message || '')
+        : '') ||
+      (typeof errObj === 'string' ? errObj : '') ||
+      (rawText.trim() ? rawText.trim() : `Spotify token error (${res.status})`);
+    throw new Error(`${msg} [HTTP ${res.status}]`);
+  }
+  if (!raw || typeof raw !== 'object') {
+    throw new Error(
+      `Spotify token response was not valid JSON [HTTP ${res.status}] | ${rawText?.slice(0, 400) || '(empty)'}`
+    );
   }
   return raw;
 }
 
-function spotifyApiFailureMessage(path: string, status: number, raw: unknown): string {
-  const o = raw as { error?: { message?: string; reason?: string; status?: number } };
+function spotifyApiFailureMessage(path: string, status: number, parsed: unknown, rawBodyText: string): string {
+  const bodyText = rawBodyText.trim();
+  const o =
+    parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as { error?: { message?: string; reason?: string; status?: number } })
+      : null;
   const spotifyMsg = o?.error?.message || o?.error?.reason || '';
-  let msg = spotifyMsg || `Spotify API error (${status})`;
-  msg = `${msg} — ${path}`;
+  let detail = bodyText;
+  if (!detail) {
+    try {
+      detail = parsed !== undefined ? JSON.stringify(parsed) : '(empty body)';
+    } catch {
+      detail = '(unserializable body)';
+    }
+  }
+  const truncated = detail.length > 900 ? `${detail.slice(0, 900)}…` : detail;
+  let msg = `${spotifyMsg || `Spotify API error`} — ${path} [HTTP ${status}] | ${truncated}`;
   if (status === 403 && path.replace(/\?.*$/, '') === '/me') {
     msg +=
-      '. Common causes: app is in Development mode (add your Spotify user under Users in the Developer Dashboard), you authorized a different Spotify account than expected, or scopes are missing user-read-private. Try an incognito window if you use multiple Spotify logins.';
+      ' | Hint: Development mode (see https://developer.spotify.com/documentation/web-api/tutorials/february-2026-migration-guide ) — add this Spotify user under Users in the Developer Dashboard (max 5 users), ensure Premium where required, check you did not authorize a different account, and include user-read-private in scopes. Try an incognito window if you use multiple Spotify logins.';
     // eslint-disable-next-line no-console
-    console.error('[spotify] /v1/me returned 403', raw);
-    try {
-      msg += ` | ${JSON.stringify(raw)}`;
-    } catch {
-      /* ignore */
-    }
+    console.error('[spotify] /v1/me returned 403', { status, bodyText, parsed });
   } else if (isSpotifyDebugEnabled()) {
-    spotifyDebugLog('API error body', { path, status, body: raw });
-    try {
-      msg += ` | ${JSON.stringify(raw)}`;
-    } catch {
-      msg += ' | (unserializable error body)';
-    }
+    spotifyDebugLog('API error body', { path, status, bodyText, parsed });
   }
   return msg;
 }
@@ -361,22 +385,50 @@ export async function refreshSpotifyAccessToken(args: {
   };
 }
 
+/**
+ * GET from api.spotify.com with Bearer token. Spotify allows browser calls; if the error body looks empty in-app,
+ * check DevTools Network for the real response. To verify the token outside the browser:
+ * `curl -sS -H "Authorization: Bearer <token>" https://api.spotify.com/v1/me`
+ */
 export async function spotifyApiFetch<T>(
   path: string,
   args: { accessToken: string; signal?: AbortSignal }
 ): Promise<T> {
+  const accessToken = String(args.accessToken || '').trim();
+  if (!accessToken) {
+    throw new Error('Spotify access token is missing — Authorization header would be invalid. Reconnect Spotify.');
+  }
+  // Real Spotify access tokens are long opaque strings; a very short value usually means a bug or truncated storage.
+  if (accessToken.length < 20) {
+    throw new Error(
+      `Spotify access token looks invalid (length ${accessToken.length}). Reconnect Spotify and check the token exchange.`
+    );
+  }
+
   const res = await fetch(`${SPOTIFY_API_BASE}${path}`, {
     method: 'GET',
     headers: {
-      Authorization: `Bearer ${args.accessToken}`,
+      Authorization: `Bearer ${accessToken}`,
       Accept: 'application/json',
     },
     signal: args.signal,
   });
 
   if (!res.ok) {
-    const raw = await res.json().catch(() => ({}));
-    throw new Error(spotifyApiFailureMessage(path, res.status, raw));
+    const wwwAuth = res.headers.get('www-authenticate');
+    if (isSpotifyDebugEnabled() && wwwAuth) {
+      spotifyDebugLog('WWW-Authenticate', wwwAuth);
+    }
+    const rawBodyText = await res.text();
+    let parsed: unknown = null;
+    if (rawBodyText.trim()) {
+      try {
+        parsed = JSON.parse(rawBodyText);
+      } catch {
+        parsed = null;
+      }
+    }
+    throw new Error(spotifyApiFailureMessage(path, res.status, parsed, rawBodyText));
   }
   return (await res.json()) as T;
 }
