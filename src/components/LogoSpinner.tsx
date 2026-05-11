@@ -1,3 +1,4 @@
+import { publicAsset } from '../lib/publicAsset';
 import styles from './LogoSpinner.module.css';
 
 export function LogoSpinner() {
@@ -5,7 +6,7 @@ export function LogoSpinner() {
     <div className={styles.wrapper}>
       <div className={styles.ring}>
         <img
-          src="/streamvault-logo.png"
+          src={publicAsset('streamvault-logo.png')}
           alt="StreamVault logo"
           className={styles.logo}
         />

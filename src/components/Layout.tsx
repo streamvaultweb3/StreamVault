@@ -19,6 +19,7 @@ import { fetchTurboBalance, formatTurboCredits, type TurboBalance } from '../lib
 import { ensureWanderConnect, openWanderConnect } from '../lib/wanderConnect';
 import { ConnectButton } from '@arweave-wallet-kit/react';
 import { setUserProperties, trackEvent } from '../lib/analytics';
+import { publicAsset } from '../lib/publicAsset';
 import styles from './Layout.module.css';
 
 const ARWEAVE_PERMISSIONS = ['ACCESS_ADDRESS', 'ACCESS_PUBLIC_KEY', 'SIGN_TRANSACTION', 'SIGNATURE', 'DISPATCH'];
@@ -751,7 +752,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
           </button>
           <Link to="/" className={styles.logo}>
             <img
-              src="/streamvault-logo.png"
+              src={publicAsset('streamvault-logo.png')}
               alt="StreamVault"
               className={styles.logoMark}
             />
