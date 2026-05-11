@@ -119,6 +119,9 @@ function IconTools({ className }: IconProps) {
   );
 }
 
+/** Re-enable when Creator tools is ready; hiding keeps the mobile Vault nav on one row (9 cols + upload). */
+const SHOW_CREATOR_TOOLS_IN_VAULT_NAV = false;
+
 export function VaultLayout() {
   const { address, walletType } = useWallet();
   const { audiusUser, apiKeyConfigured } = useAudiusAuth();
@@ -135,7 +138,9 @@ export function VaultLayout() {
     { to: '/vault/wallet', end: false, label: 'Wallet', icon: IconWallet },
     { to: '/vault/rewards', end: false, label: 'Rewards', icon: IconRewards },
     { to: '/vault/playlists', end: false, label: 'Playlists', icon: IconPlaylists },
-    { to: '/vault/creator-tools', end: false, label: 'Creator tools', icon: IconTools },
+    ...(SHOW_CREATOR_TOOLS_IN_VAULT_NAV
+      ? [{ to: '/vault/creator-tools' as const, end: false, label: 'Creator tools', icon: IconTools }]
+      : []),
   ];
 
   return (
