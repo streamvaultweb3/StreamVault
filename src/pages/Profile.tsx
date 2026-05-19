@@ -45,6 +45,7 @@ import {
   matchUploadedTrackToAudiusTrack,
   mergeAudiusTrackWithPersistedUpload,
   normalizeUploadedTrackRecord,
+  uploadedTrackToPlayerTrack,
   uploadedTrackShareUrl,
   type UploadedTrackRecord,
 } from '../lib/uploadedTracks';
@@ -698,6 +699,18 @@ export function Profile() {
   }, [aoPublishedTracks, localSamples, profileArweaveTracks]);
 
   const useUnifiedMusicGrid = visibleAudiusTracks.length > 0;
+
+  /** Arweave uploads not paired with a visible Audius row (hidden when unified grid omitted them). */
+  const arweaveOnlyProfileUploads = useMemo(() => {
+    if (!useUnifiedMusicGrid) return mergedProfileUploads;
+    const matchedTxIds = new Set<string>();
+    for (const track of visibleAudiusTracks) {
+      const playable = toPlayableTrack(track);
+      const matched = matchUploadedTrackToAudiusTrack(mergedProfileUploads, playable);
+      if (matched) matchedTxIds.add(matched.txId);
+    }
+    return mergedProfileUploads.filter((upload) => !matchedTxIds.has(upload.txId));
+  }, [mergedProfileUploads, useUnifiedMusicGrid, visibleAudiusTracks]);
 
   const handleAddSample = async () => {
     if (!libs?.addToZone || !normalizedProfile?.id || walletType !== 'arweave') return;
@@ -1587,21 +1600,25 @@ export function Profile() {
         </section>
       )}
 
-      {!useUnifiedMusicGrid && profileArweaveTracks.length > 0 && (
+      {arweaveOnlyProfileUploads.length > 0 && (
         <section className={styles.section + ' ' + styles.sectionTight}>
           <div className={styles.sectionHeader}>
-            <h2 className={styles.sectionTitle}>My tracks on Arweave</h2>
+            <h2 className={styles.sectionTitle}>
+              {useUnifiedMusicGrid ? 'Arweave uploads' : 'My tracks on Arweave'}
+            </h2>
           </div>
           <p className={styles.subtext}>
-            Full uploads stored on your permaweb profile zone. Use arweave.net (or a stored permaweb link) to open the data tx.
+            {useUnifiedMusicGrid
+              ? 'Permanent uploads on your profile that are not listed in the Audius catalog above.'
+              : 'Full uploads stored on your permaweb profile zone. Use arweave.net (or a stored permaweb link) to open the data tx.'}{' '}
             You can also use these clips in the{' '}
             <a href="#/vault/creator-tools" className={styles.link}>Beat generator</a>.
           </p>
           <div className={styles.trackGrid}>
-            {profileArweaveTracks.map((sample) => (
+            {arweaveOnlyProfileUploads.map((sample) => (
               <TrackCard
                 key={sample.txId}
-                track={uploadedSampleToTrack(sample)}
+                track={uploadedTrackToPlayerTrack(sample)}
                 artistHref={sample.walletAddress ? arweaveArtistPath(sample.walletAddress) : undefined}
                 showPermanentBadge={false}
                 footerContent={
