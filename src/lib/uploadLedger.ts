@@ -33,6 +33,25 @@ export function appendUploadLedger(entry: UploadLedgerEntry): void {
   }
 }
 
+/** Find a ledger entry by Arweave tx id (any wallet). */
+export function findUploadLedgerByTxId(txId: string): UploadLedgerEntry | null {
+  if (typeof window === 'undefined' || !txId.trim()) return null;
+  try {
+    const raw = window.localStorage.getItem(LEDGER_KEY);
+    const list = (raw ? JSON.parse(raw) : []) as UploadLedgerEntry[];
+    const hit = list.find((e) => e?.txId === txId);
+    if (!hit) return null;
+    const normalized = normalizeUploadedTrackRecord(hit);
+    if (!normalized) return null;
+    const walletAddress = typeof hit.walletAddress === 'string' ? hit.walletAddress : normalized.walletAddress;
+    return walletAddress
+      ? { ...normalized, walletAddress: normalizeAddr(walletAddress) }
+      : { ...normalized, walletAddress: '' };
+  } catch {
+    return null;
+  }
+}
+
 /** Entries for any of the given wallet addresses (dedupe by txId). */
 export function readUploadLedger(walletAddresses: (string | null | undefined)[]): UploadLedgerEntry[] {
   if (typeof window === 'undefined') return [];

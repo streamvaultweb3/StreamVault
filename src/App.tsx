@@ -14,6 +14,7 @@ import { VaultLibrary } from './pages/vault/VaultLibrary';
 import { VaultWallet } from './pages/vault/VaultWallet';
 import { VaultRewards } from './pages/vault/VaultRewards';
 import { VaultPlaceholder } from './pages/vault/VaultPlaceholder';
+import { TrackDetail } from './pages/TrackDetail';
 import { usePlayer } from './context/PlayerContext';
 const GA_MEASUREMENT_ID = 'G-HBLXEBQB7H';
 
@@ -21,6 +22,7 @@ function getPageGroup(pathname: string): string {
   if (pathname.startsWith('/vault')) return 'vault';
   if (pathname.startsWith('/profile')) return 'profile';
   if (pathname.startsWith('/artist')) return 'artist';
+  if (pathname.startsWith('/track')) return 'track';
   if (pathname.startsWith('/creator-tools')) return 'creator_tools';
   return 'discover';
 }
@@ -68,6 +70,7 @@ export default function App() {
         <Route path="/" element={<Home />} />
         <Route path="/artist/:id" element={<Artist />} />
         <Route path="/profile/:address" element={<Profile />} />
+        <Route path="/track/:txId" element={<TrackDetail />} />
         <Route path="/creator-tools" element={<Navigate to="/vault/creator-tools" replace />} />
         <Route path="/vault" element={<VaultLayout />}>
           <Route index element={<VaultTrending />} />
