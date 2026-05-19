@@ -2,21 +2,38 @@ import type { ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import type { Track } from '../context/PlayerContext';
 import { usePlayer } from '../context/PlayerContext';
+import { trackDetailPath } from '../lib/arweaveTxDetail';
+import { defaultArtistHrefForTrack } from '../lib/arweaveArtist';
 import styles from './TrackCard.module.css';
 
 interface TrackCardProps {
   track: Track;
   onPublishClick?: () => void;
-  /** If set, use this for the artist link (e.g. /profile/address for vault tracks). */
+  /** If set, use this for the artist link (e.g. /artist/arweave/:wallet). */
   artistHref?: string;
+  /** If set, use this for the track title link (defaults to /track/:txId for permanent uploads). */
+  titleHref?: string;
   footerContent?: ReactNode;
   showPermanentBadge?: boolean;
 }
 
-export function TrackCard({ track, onPublishClick, artistHref, footerContent, showPermanentBadge = true }: TrackCardProps) {
+function defaultTitleHref(track: Track): string | undefined {
+  const txId = track.permaTxId || (track.isPermanent ? track.id : undefined);
+  return txId ? trackDetailPath(txId) : undefined;
+}
+
+export function TrackCard({
+  track,
+  onPublishClick,
+  artistHref,
+  titleHref,
+  footerContent,
+  showPermanentBadge = true,
+}: TrackCardProps) {
   const { play, pause, currentTrack, isPlaying } = usePlayer();
   const isCurrent = currentTrack?.id === track.id;
-  const artistTo = artistHref ?? `/artist/${track.artistId}`;
+  const artistTo = artistHref ?? defaultArtistHrefForTrack(track) ?? `/artist/${track.artistId}`;
+  const titleTo = titleHref ?? defaultTitleHref(track);
 
   const handlePlay = () => {
     if (isCurrent && isPlaying) pause();
@@ -40,7 +57,13 @@ export function TrackCard({ track, onPublishClick, artistHref, footerContent, sh
         </span>
       </button>
       <div className={styles.body}>
-        <h3 className={styles.title}>{track.title}</h3>
+        {titleTo ? (
+          <Link to={titleTo} className={styles.titleLink}>
+            {track.title}
+          </Link>
+        ) : (
+          <h3 className={styles.title}>{track.title}</h3>
+        )}
         <Link to={artistTo} className={styles.artist}>
           {track.artist}
         </Link>

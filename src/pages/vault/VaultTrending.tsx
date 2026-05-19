@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { arweaveArtistPath } from '../../lib/arweaveArtist';
 import { fetchTrendingTracks } from '../../lib/arweaveDiscovery';
 import { TrackCard } from '../../components/TrackCard';
 import { LogoSpinner } from '../../components/LogoSpinner';
@@ -42,7 +43,7 @@ export function VaultTrending() {
             <TrackCard
               key={track.id}
               track={track}
-              artistHref={track.artistId && track.artistId.length > 20 ? `/profile/${track.artistId}` : undefined}
+              artistHref={track.artistId && track.artistId.length > 20 ? arweaveArtistPath(track.artistId) : undefined}
             />
           ))}
         </section>

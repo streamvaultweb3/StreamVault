@@ -22,6 +22,7 @@ import { useWallet } from '../context/WalletContext';
 import { usePermaweb } from '../context/PermawebContext';
 import { CreateProfileModal } from '../components/CreateProfileModal';
 import { getSelectedOrLatestProfileByWallet } from '../lib/permaProfile';
+import { arweaveArtistPath } from '../lib/arweaveArtist';
 import { queryPermanentUploads } from '../lib/arweaveDiscovery';
 import { uploadedTrackToPlayerTrack, type UploadedTrackRecord } from '../lib/uploadedTracks';
 import { useAudiusAuth } from '../context/AudiusAuthContext';
@@ -376,7 +377,7 @@ export function Home() {
                 track={item.track}
                 artistHref={
                   item.kind === 'arweave' && item.upload?.walletAddress
-                    ? `/profile/${item.upload.walletAddress}`
+                    ? arweaveArtistPath(item.upload.walletAddress)
                     : undefined
                 }
                 showPermanentBadge={false}

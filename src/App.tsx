@@ -3,6 +3,7 @@ import { Routes, Route, useLocation, Navigate } from 'react-router-dom';
 import { Layout } from './components/Layout';
 import { Home } from './pages/Home';
 import { Artist } from './pages/Artist';
+import { ArweaveArtist } from './pages/ArweaveArtist';
 import { Profile } from './pages/Profile';
 import { CreatorTools } from './pages/CreatorTools';
 import { NowPlayingBar } from './components/NowPlayingBar';
@@ -68,6 +69,7 @@ export default function App() {
       <RouteAnalytics />
       <Routes>
         <Route path="/" element={<Home />} />
+        <Route path="/artist/arweave/:address" element={<ArweaveArtist />} />
         <Route path="/artist/:id" element={<Artist />} />
         <Route path="/profile/:address" element={<Profile />} />
         <Route path="/track/:txId" element={<TrackDetail />} />

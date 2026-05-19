@@ -39,6 +39,7 @@ import {
 import { resolveProfileTokens, type ResolvedProfileToken } from '../lib/profileTokens';
 import { PublishModal } from '../components/PublishModal';
 import { arweaveTxDataUrl, turboTxDataUrl } from '../lib/arweaveDataGateway';
+import { arweaveArtistPath } from '../lib/arweaveArtist';
 import { readUploadLedger } from '../lib/uploadLedger';
 import {
   matchUploadedTrackToAudiusTrack,
@@ -1601,7 +1602,7 @@ export function Profile() {
               <TrackCard
                 key={sample.txId}
                 track={uploadedSampleToTrack(sample)}
-                artistHref={sample.walletAddress ? `/profile/${sample.walletAddress}` : undefined}
+                artistHref={sample.walletAddress ? arweaveArtistPath(sample.walletAddress) : undefined}
                 showPermanentBadge={false}
                 footerContent={
                   <>
@@ -1671,7 +1672,7 @@ export function Profile() {
                   permaTxId: t.audioTxId,
                   assetId: t.assetId,
                 }}
-                artistHref={t.creator ? `/profile/${t.creator}` : undefined}
+                artistHref={t.creator ? arweaveArtistPath(t.creator) : undefined}
                 showPermanentBadge={false}
                 footerContent={
                   <>
@@ -1729,7 +1730,7 @@ export function Profile() {
               <TrackCard
                 key={sample.txId}
                 track={uploadedSampleToTrack(sample)}
-                artistHref={sample.walletAddress ? `/profile/${sample.walletAddress}` : undefined}
+                artistHref={sample.walletAddress ? arweaveArtistPath(sample.walletAddress) : undefined}
                 showPermanentBadge={false}
                 footerContent={
                   <>

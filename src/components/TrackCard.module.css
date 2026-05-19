@@ -70,7 +70,8 @@
   padding: 14px;
 }
 
-.title {
+.title,
+.titleLink {
   font-size: var(--text-base);
   font-weight: var(--font-semibold);
   color: var(--text-primary);
@@ -78,6 +79,11 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  display: block;
+}
+
+.titleLink:hover {
+  color: var(--accent);
 }
 
 .artist {

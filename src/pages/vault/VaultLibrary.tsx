@@ -19,6 +19,7 @@ import {
   type AudiusTrack,
 } from '../../lib/audius';
 import { PublishModal } from '../../components/PublishModal';
+import { arweaveArtistPath } from '../../lib/arweaveArtist';
 import { readUploadLedger } from '../../lib/uploadLedger';
 import { arweaveTxDataUrl } from '../../lib/arweaveDataGateway';
 import {
@@ -341,7 +342,7 @@ export function VaultLibrary() {
                     <TrackCard
                       key={track.txId}
                       track={uploadedTrackToPlayerTrack(track)}
-                      artistHref={`/profile/${address}`}
+                      artistHref={arweaveArtistPath(address)}
                       showPermanentBadge={false}
                       footerContent={
                         <>
@@ -369,7 +370,7 @@ export function VaultLibrary() {
                     <TrackCard
                       key={track.id}
                       track={displayTrack}
-                      artistHref={`/profile/${address}`}
+                      artistHref={arweaveArtistPath(address)}
                       showPermanentBadge={false}
                       footerContent={
                         uploaded ? (
