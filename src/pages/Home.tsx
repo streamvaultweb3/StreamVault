@@ -22,9 +22,10 @@ import { useWallet } from '../context/WalletContext';
 import { usePermaweb } from '../context/PermawebContext';
 import { CreateProfileModal } from '../components/CreateProfileModal';
 import { getSelectedOrLatestProfileByWallet } from '../lib/permaProfile';
-import { arweaveArtistPath } from '../lib/arweaveArtist';
-import { queryPermanentUploads } from '../lib/arweaveDiscovery';
-import { uploadedTrackToPlayerTrack, type UploadedTrackRecord } from '../lib/uploadedTracks';
+import { arweaveArtistPath, looksLikeWalletAddress } from '../lib/arweaveArtist';
+import { arweaveTxDataUrl } from '../lib/arweaveDataGateway';
+import { fetchTrendingTracks } from '../lib/arweaveDiscovery';
+import { type UploadedTrackRecord } from '../lib/uploadedTracks';
 import { useAudiusAuth } from '../context/AudiusAuthContext';
 import { PublishModal } from '../components/PublishModal';
 
@@ -40,6 +41,20 @@ function mapAudiusToTrack(a: AudiusTrack): Track {
   };
 }
 
+function arweaveTrackToUploadRecord(track: Track): UploadedTrackRecord {
+  const txId = track.permaTxId || track.id;
+  return {
+    txId,
+    title: track.title,
+    artist: track.artist,
+    permawebUrl: arweaveTxDataUrl(txId),
+    createdAt: new Date(0).toISOString(),
+    walletAddress:
+      track.artistId && looksLikeWalletAddress(track.artistId) ? track.artistId : undefined,
+    assetId: track.assetId,
+  };
+}
+
 export function Home() {
   const { address, walletType } = useWallet();
   const { libs, isReady } = usePermaweb();
@@ -52,7 +67,7 @@ export function Home() {
     authError: audiusAuthError,
   } = useAudiusAuth();
   const [tracks, setTracks] = useState<Track[]>([]);
-  const [permanentTracks, setPermanentTracks] = useState<UploadedTrackRecord[]>([]);
+  const [arweaveDiscoverTracks, setArweaveDiscoverTracks] = useState<Track[]>([]);
   const [loading, setLoading] = useState(true);
   const [permanentLoading, setPermanentLoading] = useState(true);
   const [discoverLimit, setDiscoverLimit] = useState(24);
@@ -86,20 +101,19 @@ export function Home() {
     }> = [];
     const seen = new Set<string>();
 
-    for (const upload of permanentTracks) {
-      if (isFeedTestTrack(upload.title)) continue;
-      const key = `ar:${upload.txId}`;
+    for (const arTrack of arweaveDiscoverTracks) {
+      if (isFeedTestTrack(arTrack.title)) continue;
+      const txId = arTrack.permaTxId || arTrack.id;
+      const key = `ar:${txId}`;
       if (seen.has(key)) continue;
       seen.add(key);
+      const upload = arweaveTrackToUploadRecord(arTrack);
       const borrowedArtwork =
-        upload.artworkUrl ||
-        audiusArtworkByKey.get(`${upload.title.trim().toLowerCase()}::${upload.artist.trim().toLowerCase()}`);
+        arTrack.artwork ||
+        audiusArtworkByKey.get(`${arTrack.title.trim().toLowerCase()}::${arTrack.artist.trim().toLowerCase()}`);
       merged.push({
         key,
-        track: {
-          ...uploadedTrackToPlayerTrack(upload),
-          artwork: borrowedArtwork || uploadedTrackToPlayerTrack(upload).artwork,
-        },
+        track: { ...arTrack, artwork: borrowedArtwork || arTrack.artwork },
         kind: 'arweave',
         upload,
       });
@@ -118,7 +132,7 @@ export function Home() {
     }
 
     return merged;
-  }, [permanentTracks, tracks]);
+  }, [arweaveDiscoverTracks, tracks]);
 
   const mapAudiusTrack = (a: AudiusTrack): Track => ({
     id: a.id,
@@ -288,10 +302,10 @@ export function Home() {
     (async () => {
       setPermanentLoading(true);
       try {
-        const rows = await queryPermanentUploads({ limit: 12 });
-        if (!cancelled) setPermanentTracks(rows);
+        const rows = await fetchTrendingTracks(12);
+        if (!cancelled) setArweaveDiscoverTracks(rows);
       } catch {
-        if (!cancelled) setPermanentTracks([]);
+        if (!cancelled) setArweaveDiscoverTracks([]);
       } finally {
         if (!cancelled) setPermanentLoading(false);
       }
@@ -378,7 +392,11 @@ export function Home() {
                 artistHref={
                   item.kind === 'arweave' && item.upload?.walletAddress
                     ? arweaveArtistPath(item.upload.walletAddress)
-                    : undefined
+                    : item.kind === 'arweave' &&
+                        item.track.artistId &&
+                        looksLikeWalletAddress(item.track.artistId)
+                      ? arweaveArtistPath(item.track.artistId)
+                      : undefined
                 }
                 showPermanentBadge={false}
                 footerContent={
