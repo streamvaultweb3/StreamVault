@@ -2,11 +2,18 @@
  * Log in with Audius (OAuth) — full Audius experience.
  * Persists user in localStorage; pre-fills permaweb profile Audius handle.
  */
-import React, { createContext, useContext, useState, useCallback, useEffect } from 'react';
+import React, { createContext, useContext, useState, useCallback, useEffect, useRef } from 'react';
+import {
+  buildCleanUrlAfterAudiusOAuth,
+  clearAudiusOAuthPending,
+  loadAudiusOAuthPending,
+  parseAudiusOAuthParams,
+  resolveAudiusRedirectUri,
+  saveAudiusOAuthPending,
+} from '../lib/audiusOAuth';
 
 const STORAGE_KEY = 'streamvault:audius_user';
 const TOKEN_STORAGE_KEY = 'streamvault:audius_oauth_token';
-const OAUTH_STATE_KEY = 'streamvault:audius_oauth_state';
 const AUDIUS_API_BASE = 'https://api.audius.co/v1';
 
 export interface AudiusAuthUser {
@@ -101,46 +108,18 @@ async function verifyAudiusToken(token: string): Promise<AudiusAuthUser> {
   };
 }
 
-function parseOAuthParams(search: string, hash: string) {
-  const query = new URLSearchParams(search || '');
-  const rawHash = (hash || '').replace(/^#/, '');
-
-  let hashParams = new URLSearchParams(rawHash);
-  if (rawHash.includes('?')) {
-    hashParams = new URLSearchParams(rawHash.split('?')[1] || '');
-  }
-
-  return {
-    token: query.get('token') || hashParams.get('token'),
-    state: query.get('state') || hashParams.get('state'),
-    error: query.get('error') || hashParams.get('error'),
-  };
-}
-
-function buildCleanUrlAfterOAuth() {
-  if (typeof window === 'undefined') return '/';
-  const rawHash = (window.location.hash || '').replace(/^#/, '');
-  if (rawHash.includes('?')) {
-    const hashPath = rawHash.split('?')[0] || '';
-    return `${window.location.origin}${window.location.pathname}${hashPath ? `#${hashPath}` : ''}`;
-  }
-  return `${window.location.origin}${window.location.pathname}${window.location.hash || ''}`;
-}
-
 export function AudiusAuthProvider({ children }: { children: React.ReactNode }) {
   const [audiusUser, setAudiusUser] = useState<AudiusAuthUser | null>(null);
   const [isInitialized, setIsInitialized] = useState(false);
   const [isAuthReady, setIsAuthReady] = useState(true);
   const [isLoggingIn, setIsLoggingIn] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
+  const oauthCallbackHandledRef = useRef(false);
 
   const apiKey = typeof import.meta !== 'undefined'
     ? (import.meta.env?.VITE_AUDIUS_API_KEY || import.meta.env?.VITE_API)
     : undefined;
   const apiKeyConfigured = Boolean(apiKey?.trim());
-  const redirectUri = typeof import.meta !== 'undefined'
-    ? (import.meta.env?.VITE_AUDIUS_REDIRECT_URI || (typeof window !== 'undefined' ? window.location.origin : undefined))
-    : undefined;
 
   useEffect(() => {
     setAudiusUser(loadStoredUser());
@@ -149,23 +128,45 @@ export function AudiusAuthProvider({ children }: { children: React.ReactNode }) 
 
   useEffect(() => {
     if (!isInitialized || !apiKey?.trim()) return;
+    if (typeof window === 'undefined') return;
 
-    const { token, state, error } = parseOAuthParams(
-      typeof window !== 'undefined' ? window.location.search : '',
-      typeof window !== 'undefined' ? window.location.hash : ''
+    const { token, state, error } = parseAudiusOAuthParams(
+      window.location.search,
+      window.location.hash
     );
 
     if (error) {
       setAuthError(`Audius OAuth error: ${error}`);
       setIsLoggingIn(false);
+      clearAudiusOAuthPending();
+      window.history.replaceState({}, '', buildCleanUrlAfterAudiusOAuth());
       return;
     }
 
     if (token && state) {
-      const expectedState = sessionStorage.getItem(OAUTH_STATE_KEY);
-      if (!expectedState || state !== expectedState) {
-        setAuthError('Audius OAuth state mismatch. Please try again.');
+      if (oauthCallbackHandledRef.current) return;
+      oauthCallbackHandledRef.current = true;
+
+      const pending = loadAudiusOAuthPending();
+      const redirectUri = resolveAudiusRedirectUri();
+
+      if (!pending || pending.state !== state) {
+        setAuthError(
+          'Audius OAuth state mismatch. Open StreamVault on the same URL you started from (e.g. stream-vault.xyz), or try Connect Audius again.'
+        );
         setIsLoggingIn(false);
+        clearAudiusOAuthPending();
+        window.history.replaceState({}, '', buildCleanUrlAfterAudiusOAuth());
+        return;
+      }
+
+      if (pending.redirectUri !== redirectUri) {
+        setAuthError(
+          'Audius OAuth returned on a different site than where login started. Use one domain consistently, or register each domain in your Audius app settings.'
+        );
+        setIsLoggingIn(false);
+        clearAudiusOAuthPending();
+        window.history.replaceState({}, '', buildCleanUrlAfterAudiusOAuth());
         return;
       }
 
@@ -180,10 +181,8 @@ export function AudiusAuthProvider({ children }: { children: React.ReactNode }) 
           setAuthError(String(e?.message || 'Audius OAuth completion failed.'));
         } finally {
           setIsLoggingIn(false);
-          sessionStorage.removeItem(OAUTH_STATE_KEY);
-          if (typeof window !== 'undefined') {
-            window.history.replaceState({}, '', buildCleanUrlAfterOAuth());
-          }
+          clearAudiusOAuthPending();
+          window.history.replaceState({}, '', buildCleanUrlAfterAudiusOAuth());
         }
       })();
       return;
@@ -207,6 +206,8 @@ export function AudiusAuthProvider({ children }: { children: React.ReactNode }) 
       setAuthError('Audius API key is missing.');
       return;
     }
+
+    const redirectUri = resolveAudiusRedirectUri();
     if (!redirectUri) {
       setAuthError('Audius redirect URI is missing.');
       return;
@@ -214,9 +215,10 @@ export function AudiusAuthProvider({ children }: { children: React.ReactNode }) 
 
     setAuthError(null);
     setIsLoggingIn(true);
+    oauthCallbackHandledRef.current = false;
 
     const state = randomString(48);
-    sessionStorage.setItem(OAUTH_STATE_KEY, state);
+    saveAudiusOAuthPending(state, redirectUri);
 
     const authUrl = new URL('https://audius.co/oauth/auth');
     authUrl.searchParams.set('scope', 'read');
@@ -228,7 +230,7 @@ export function AudiusAuthProvider({ children }: { children: React.ReactNode }) 
     authUrl.searchParams.set('origin', window.location.origin);
 
     window.location.assign(authUrl.toString());
-  }, [apiKey, redirectUri]);
+  }, [apiKey]);
 
   const logout = useCallback(() => {
     const token = loadStoredToken();
@@ -237,6 +239,7 @@ export function AudiusAuthProvider({ children }: { children: React.ReactNode }) 
     setIsLoggingIn(false);
     storeUser(null);
     storeToken(null);
+    clearAudiusOAuthPending();
 
     if (token) {
       fetch(`${AUDIUS_API_BASE}/oauth/revoke`, {
