@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
+import { Link } from 'react-router-dom';
 import {
   getTrendingTracks,
   getStreamUrl,
@@ -22,10 +23,23 @@ import { useWallet } from '../context/WalletContext';
 import { usePermaweb } from '../context/PermawebContext';
 import { CreateProfileModal } from '../components/CreateProfileModal';
 import { getSelectedOrLatestProfileByWallet } from '../lib/permaProfile';
+import {
+  applyProfileZoneExtras,
+  buildPermawebProfileArgs,
+  connectArweaveSignerForProfile,
+  getWritableProfileLibs,
+  resolveArweaveSigner,
+} from '../lib/profileWrite';
+import { useApi } from '@arweave-wallet-kit/react';
 import { arweaveArtistPath, looksLikeWalletAddress } from '../lib/arweaveArtist';
 import { arweaveTxDataUrl } from '../lib/arweaveDataGateway';
-import { fetchTrendingTracks } from '../lib/arweaveDiscovery';
-import { type UploadedTrackRecord } from '../lib/uploadedTracks';
+import { fetchTrendingTracks, fetchAtomicAssetMap, enrichTracksWithAtomicAssetIds } from '../lib/arweaveDiscovery';
+import { type UploadedTrackRecord, uploadedTrackCompactBadges } from '../lib/uploadedTracks';
+import { ATOMIC_ASSET_BADGE } from '../lib/trackBadges';
+import { fetchStreamVaultMarketplaceListings, type MarketplaceListing } from '../lib/ucmMarketplace';
+import { trackDetailPath } from '../lib/arweaveTxDetail';
+import { bazarAssetUrl } from '../lib/ucm';
+import { findUploadLedgerByTxId } from '../lib/uploadLedger';
 import { useAudiusAuth } from '../context/AudiusAuthContext';
 import { PublishModal } from '../components/PublishModal';
 
@@ -43,6 +57,20 @@ function mapAudiusToTrack(a: AudiusTrack): Track {
 
 function arweaveTrackToUploadRecord(track: Track): UploadedTrackRecord {
   const txId = track.permaTxId || track.id;
+  let artworkTxId: string | undefined;
+  let artworkUrl: string | undefined;
+  if (track.artwork) {
+    if (track.artwork.includes('/')) {
+      artworkUrl = track.artwork;
+      const match = track.artwork.match(/[A-Za-z0-9_-]{43}/);
+      if (match) artworkTxId = match[0];
+    } else if (track.artwork.length === 43) {
+      artworkTxId = track.artwork;
+      artworkUrl = arweaveTxDataUrl(track.artwork);
+    } else {
+      artworkUrl = track.artwork;
+    }
+  }
   return {
     txId,
     title: track.title,
@@ -52,12 +80,15 @@ function arweaveTrackToUploadRecord(track: Track): UploadedTrackRecord {
     walletAddress:
       track.artistId && looksLikeWalletAddress(track.artistId) ? track.artistId : undefined,
     assetId: track.assetId,
+    artworkTxId,
+    artworkUrl,
   };
 }
 
 export function Home() {
   const { address, walletType } = useWallet();
-  const { libs, isReady } = usePermaweb();
+  const { libs, isReady, getWritableLibs } = usePermaweb();
+  const arweaveApi = useApi();
   const {
     audiusUser: connectedAudiusUser,
     login: audiusLogin,
@@ -85,6 +116,9 @@ export function Home() {
   const [createError, setCreateError] = useState<string | null>(null);
   const [hasPermaProfile, setHasPermaProfile] = useState(false);
   const [publishOpen, setPublishOpen] = useState(false);
+  const [atomicAssetByAudioTx, setAtomicAssetByAudioTx] = useState<Record<string, string>>({});
+  const [marketListings, setMarketListings] = useState<MarketplaceListing[]>([]);
+  const [marketLoading, setMarketLoading] = useState(true);
 
   const discoverTracks = useMemo(() => {
     const isFeedTestTrack = (title: string) => title.toLowerCase().includes('test');
@@ -107,13 +141,23 @@ export function Home() {
       const key = `ar:${txId}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      const upload = arweaveTrackToUploadRecord(arTrack);
+      const ledgerHit = findUploadLedgerByTxId(txId);
+      const assetId =
+        arTrack.assetId || ledgerHit?.assetId || atomicAssetByAudioTx[txId] || undefined;
+      const trackWithAsset = {
+        ...arTrack,
+        assetId,
+      };
+      const upload: UploadedTrackRecord = {
+        ...arweaveTrackToUploadRecord(trackWithAsset),
+        assetId,
+      };
       const borrowedArtwork =
         arTrack.artwork ||
         audiusArtworkByKey.get(`${arTrack.title.trim().toLowerCase()}::${arTrack.artist.trim().toLowerCase()}`);
       merged.push({
         key,
-        track: { ...arTrack, artwork: borrowedArtwork || arTrack.artwork },
+        track: { ...trackWithAsset, artwork: borrowedArtwork || arTrack.artwork },
         kind: 'arweave',
         upload,
       });
@@ -132,7 +176,7 @@ export function Home() {
     }
 
     return merged;
-  }, [arweaveDiscoverTracks, tracks]);
+  }, [arweaveDiscoverTracks, atomicAssetByAudioTx, tracks]);
 
   const mapAudiusTrack = (a: AudiusTrack): Track => ({
     id: a.id,
@@ -232,7 +276,7 @@ export function Home() {
     removeThumbnail?: boolean;
     removeBanner?: boolean;
   }) => {
-    if (!libs?.createProfile || !address || walletType !== 'arweave') return;
+    if (!libs || !address || walletType !== 'arweave') return;
     setCreating(true);
     setCreateError(null);
     try {
@@ -244,24 +288,18 @@ export function Home() {
         setCreateOpen(false);
         return;
       }
-      const args: any = {
-        username: form.username.trim(),
-        displayName: form.displayName.trim(),
-        description: form.description.trim(),
-      };
-      if (form.thumbnail) args.thumbnail = await fileToDataURL(form.thumbnail);
-      if (form.banner) args.banner = await fileToDataURL(form.banner);
-      const profileId = await libs.createProfile(args);
+      const signerWallet = resolveArweaveSigner(arweaveApi);
+      if (!signerWallet) throw new Error('Arweave signer unavailable. Connect Wander and retry.');
+      await connectArweaveSignerForProfile(signerWallet);
+      const writableLibs = await getWritableProfileLibs(getWritableLibs);
+      const args = await buildPermawebProfileArgs(form, fileToDataURL, writableLibs);
+      const profileId = await writableLibs.createProfile(args);
       console.info('[profile] create success', { profileId });
-      if (profileId && libs.updateZone) {
-        const update: Record<string, string> = {
-          Name: form.displayName.trim(),
-          Handle: form.username.trim(),
-          Bio: form.description.trim(),
-        };
-        if (form.audiusHandle) update.AudiusHandle = form.audiusHandle;
-        await libs.updateZone(update, profileId);
-        console.info('[profile] profile updated', { profileId });
+      if (!profileId) throw new Error('permaweb-libs createProfile returned no profile id.');
+      if (form.audiusHandle?.trim()) {
+        await applyProfileZoneExtras(writableLibs, profileId, {
+          audiusHandle: form.audiusHandle.trim(),
+        });
       }
       setCreateOpen(false);
     } catch (e: any) {
@@ -276,6 +314,62 @@ export function Home() {
       setCreating(false);
     }
   };
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setPermanentLoading(true);
+      try {
+        const assetMap = await fetchAtomicAssetMap({ limit: 100 });
+        if (cancelled) return;
+        setAtomicAssetByAudioTx(Object.fromEntries(assetMap));
+        const rows = await fetchTrendingTracks(24);
+        const enriched = await enrichTracksWithAtomicAssetIds(rows, assetMap);
+        if (!cancelled) setArweaveDiscoverTracks(enriched);
+      } catch {
+        if (!cancelled) setArweaveDiscoverTracks([]);
+      } finally {
+        if (!cancelled) setPermanentLoading(false);
+      }
+    })();
+    const onUploads = () => {
+      void (async () => {
+        const assetMap = await fetchAtomicAssetMap({ limit: 100 });
+        setAtomicAssetByAudioTx(Object.fromEntries(assetMap));
+        setArweaveDiscoverTracks((prev) => {
+          void enrichTracksWithAtomicAssetIds(prev, assetMap).then(setArweaveDiscoverTracks);
+          return prev;
+        });
+      })();
+    };
+    window.addEventListener('streamvault:uploads-updated', onUploads);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('streamvault:uploads-updated', onUploads);
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadMarket = async () => {
+      setMarketLoading(true);
+      try {
+        const rows = await fetchStreamVaultMarketplaceListings(12);
+        if (!cancelled) setMarketListings(rows);
+      } catch {
+        if (!cancelled) setMarketListings([]);
+      } finally {
+        if (!cancelled) setMarketLoading(false);
+      }
+    };
+    void loadMarket();
+    const onUpdate = () => void loadMarket();
+    window.addEventListener('streamvault:marketplace-updated', onUpdate);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('streamvault:marketplace-updated', onUpdate);
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -296,24 +390,6 @@ export function Home() {
     })();
     return () => { cancelled = true; };
   }, [discoverLimit]);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      setPermanentLoading(true);
-      try {
-        const rows = await fetchTrendingTracks(12);
-        if (!cancelled) setArweaveDiscoverTracks(rows);
-      } catch {
-        if (!cancelled) setArweaveDiscoverTracks([]);
-      } finally {
-        if (!cancelled) setPermanentLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -380,10 +456,13 @@ export function Home() {
         {audiusAuthError && <p className={styles.errorText}>{audiusAuthError}</p>}
       </section>
 
-      {loading || permanentLoading ? (
+      {loading && discoverTracks.length === 0 ? (
         <LogoSpinner />
       ) : (
         <>
+          {permanentLoading && discoverTracks.length === 0 && (
+            <p className={styles.sectionSubtitle}>Loading permanent uploads…</p>
+          )}
           <section className={styles.grid}>
             {discoverTracks.map((item) => (
               <TrackCard
@@ -401,10 +480,20 @@ export function Home() {
                 showPermanentBadge={false}
                 footerContent={
                   item.kind === 'arweave' && item.upload ? (
-                    <>
-                      <span className={styles.sourcePill}>Arweave</span>
-                      <UploadedTrackMeta track={item.upload} compact />
-                    </>
+                    <div className={styles.discoverFooterStack}>
+                      <div className={styles.discoverBadgeRow}>
+                        <span className={styles.sourcePill}>Arweave</span>
+                        {uploadedTrackCompactBadges({
+                          ...item.upload,
+                          assetId: item.upload.assetId || item.track.assetId,
+                        }).map((badge) => (
+                          <span key={badge} className={styles.sourcePill}>
+                            {badge}
+                          </span>
+                        ))}
+                      </div>
+                      <UploadedTrackMeta track={item.upload} compact hideBadges />
+                    </div>
                   ) : (
                     <span className={styles.sourcePill}>Audius</span>
                   )
@@ -412,6 +501,63 @@ export function Home() {
               />
             ))}
           </section>
+
+          {(marketLoading || marketListings.length > 0) && (
+            <section className={styles.marketSection}>
+              <div className={styles.audiusHeader}>
+                <div className={styles.audiusIntro}>
+                  <h2 className={styles.sectionTitle}>Listed on UCM</h2>
+                  <p className={styles.sectionSubtitle}>
+                    StreamVault atomic assets with active sell orders on the Universal Content Marketplace.
+                  </p>
+                </div>
+              </div>
+              {marketLoading ? (
+                <LogoSpinner />
+              ) : (
+                <div className={styles.grid}>
+                  {marketListings.map((listing) => (
+                    <TrackCard
+                      key={listing.orderId}
+                      track={listing.track}
+                      titleHref={trackDetailPath(listing.audioTxId)}
+                      artistHref={
+                        listing.track.artistId && looksLikeWalletAddress(listing.track.artistId)
+                          ? arweaveArtistPath(listing.track.artistId)
+                          : undefined
+                      }
+                      showPermanentBadge={false}
+                      footerContent={
+                        <div className={styles.discoverFooterStack}>
+                          <div className={styles.discoverBadgeRow}>
+                            <span className={styles.sourcePill}>
+                              {listing.priceDisplay} {listing.quoteSymbol}
+                            </span>
+                            <span className={styles.sourcePill}>{ATOMIC_ASSET_BADGE}</span>
+                            <span className={styles.sourcePill}>UCM</span>
+                          </div>
+                          <div className={styles.marketLinks}>
+                            <Link to={trackDetailPath(listing.audioTxId)} className={styles.marketLink}>
+                              Details
+                            </Link>
+                            <a
+                              href={bazarAssetUrl(listing.assetId)}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className={styles.marketLink}
+                            >
+                              Bazar
+                            </a>
+                          </div>
+                        </div>
+                      }
+                    />
+                  ))}
+                </div>
+              )}
+            </section>
+          )}
+
           <div className={styles.audiusCta} style={{ marginTop: '16px' }}>
             <div>
               <p className={styles.ctaTitle}>More from Discover</p>

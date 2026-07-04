@@ -9,15 +9,20 @@ import {
   explorerTransactionRows,
   fetchArweaveTxExplorer,
   isAudioContentType,
+  mergeArweaveTags,
   parseTrackTagSections,
   trackStreamUrl,
+  uploadRecordToArweaveTags,
+  type ArweaveTag,
   type ArweaveTxExplorerData,
-  type ParsedTrackTags,
   type TxFieldRow,
 } from '../lib/arweaveTxDetail';
 import { arweaveArtistPath, looksLikeWalletAddress } from '../lib/arweaveArtist';
+import { portalHyperbeamAssetUrl } from '../lib/aoNode';
 import { findUploadLedgerByTxId } from '../lib/uploadLedger';
+import { findAtomicAssetIdForAudioTx, fetchAtomicAssetMap, fetchAtomicAssetDisplayMetadata, type AtomicAssetDisplayMetadata } from '../lib/arweaveDiscovery';
 import { uploadedTrackToPlayerTrack } from '../lib/uploadedTracks';
+import { ListOnUcm } from '../components/ListOnUcm';
 import styles from './TrackDetail.module.css';
 
 function FieldRow({ row }: { row: TxFieldRow }) {
@@ -55,7 +60,7 @@ function TagSection({ title, rows }: { title: string; rows: TxFieldRow[] }) {
   );
 }
 
-function OtherTagsTable({ tags }: { tags: ParsedTrackTags['other'] }) {
+function OtherTagsTable({ tags }: { tags: ArweaveTag[] }) {
   if (!tags.length) return null;
   return (
     <section className={styles.section + ' glass'}>
@@ -114,49 +119,151 @@ export function TrackDetail() {
     };
   }, [rawTxId]);
 
-  const tags = data?.transaction?.tags ?? [];
+  const ledgerTrack = useMemo(() => {
+    const lookupId = data?.audioTxId || data?.txId;
+    if (!lookupId) return null;
+    return findUploadLedgerByTxId(lookupId);
+  }, [data?.audioTxId, data?.txId]);
+
+  const onChainTags = data?.transaction?.tags ?? [];
+  const tags = useMemo(
+    () =>
+      mergeArweaveTags(
+        onChainTags,
+        ledgerTrack ? uploadRecordToArweaveTags(ledgerTrack) : undefined
+      ),
+    [onChainTags, ledgerTrack]
+  );
   const sections = useMemo(() => parseTrackTagSections(tags), [tags]);
   const txRows = useMemo(() => (data ? explorerTransactionRows(data) : []), [data]);
 
-  const ledgerTrack = useMemo(() => {
-    if (!data?.txId) return null;
-    return findUploadLedgerByTxId(data.txId);
-  }, [data?.txId]);
+  const [resolvedAssetId, setResolvedAssetId] = useState<string | null>(null);
+  const [assetMetadataFallback, setAssetMetadataFallback] = useState<AtomicAssetDisplayMetadata | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!data?.txId) {
+        setResolvedAssetId(null);
+        return;
+      }
+
+      if (data.processId) {
+        if (!cancelled) setResolvedAssetId(data.processId);
+        return;
+      }
+
+      const tagValue = (name: string) => tags.find((t) => t.name === name)?.value?.trim() || '';
+
+      const fromTrackIdTag = tagValue('Track-Id');
+      if (fromTrackIdTag) {
+        if (!cancelled) setResolvedAssetId(fromTrackIdTag);
+        return;
+      }
+
+      const fromLedger = ledgerTrack?.assetId || null;
+      if (fromLedger) {
+        if (!cancelled) setResolvedAssetId(fromLedger);
+        return;
+      }
+
+      const audioLookupId = data.audioTxId || data.txId;
+      const fromGraph = await findAtomicAssetIdForAudioTx(audioLookupId);
+      if (fromGraph) {
+        if (!cancelled) setResolvedAssetId(fromGraph);
+        return;
+      }
+
+      const fromMap = (await fetchAtomicAssetMap({ limit: 100 })).get(audioLookupId) || null;
+      if (!cancelled) setResolvedAssetId(fromMap);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [data?.txId, data?.processId, data?.audioTxId, tags, ledgerTrack?.assetId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!resolvedAssetId) {
+        setAssetMetadataFallback(null);
+        return;
+      }
+
+      const hasIdentityTags = Boolean(
+        tags.find((t) => t.name === 'Title')?.value ||
+          tags.find((t) => t.name === 'Artist')?.value ||
+          artworkUrlFromTags(tags)
+      );
+      const hasLedgerMeta = Boolean(
+        ledgerTrack?.title || ledgerTrack?.artist || ledgerTrack?.artworkTxId || ledgerTrack?.artworkUrl
+      );
+      if (hasIdentityTags || hasLedgerMeta) {
+        setAssetMetadataFallback(null);
+        return;
+      }
+
+      const meta = await fetchAtomicAssetDisplayMetadata(resolvedAssetId);
+      if (!cancelled) setAssetMetadataFallback(meta);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [resolvedAssetId, tags, ledgerTrack?.title, ledgerTrack?.artist, ledgerTrack?.artworkTxId, ledgerTrack?.artworkUrl]);
 
   const title =
     sections.identity.find((r) => r.label === 'Title')?.value ||
     ledgerTrack?.title ||
+    assetMetadataFallback?.title ||
     'Untitled';
   const artist =
     sections.identity.find((r) => r.label === 'Artist')?.value ||
     ledgerTrack?.artist ||
+    assetMetadataFallback?.artist ||
     'Unknown artist';
   const creator =
     sections.identity.find((r) => r.label === 'Creator')?.value ||
     data?.transaction?.owner ||
-    ledgerTrack?.walletAddress;
+    ledgerTrack?.walletAddress ||
+    assetMetadataFallback?.creator;
   const contentType =
     tags.find((t) => t.name === 'Content-Type')?.value || ledgerTrack?.contentType;
   const isAudio = isAudioContentType(contentType);
   const coverUrl =
     artworkUrlFromTags(tags) ||
-    (ledgerTrack?.artworkTxId ? arweaveTxDataUrl(ledgerTrack.artworkTxId) : ledgerTrack?.artworkUrl);
+    (ledgerTrack?.artworkTxId ? arweaveTxDataUrl(ledgerTrack.artworkTxId) : ledgerTrack?.artworkUrl) ||
+    assetMetadataFallback?.artworkUrl;
 
   const playerTrack: Track | null = useMemo(() => {
-    if (!data?.txId) return null;
+    const streamTxId = data?.audioTxId || data?.txId;
+    if (!streamTxId) return null;
     if (ledgerTrack) return uploadedTrackToPlayerTrack(ledgerTrack);
     if (!isAudio) return null;
     return {
-      id: data.txId,
+      id: streamTxId,
       title,
       artist,
-      artistId: creator || data.txId,
+      artistId: creator || streamTxId,
       artwork: coverUrl,
-      streamUrl: trackStreamUrl(data.txId, tags, true),
+      streamUrl: trackStreamUrl(streamTxId, tags, true),
       isPermanent: true,
-      permaTxId: data.txId,
+      permaTxId: streamTxId,
+      assetId: resolvedAssetId || undefined,
     };
-  }, [data?.txId, ledgerTrack, isAudio, title, artist, creator, tags, coverUrl]);
+  }, [data?.audioTxId, data?.txId, ledgerTrack, isAudio, title, artist, creator, tags, coverUrl, resolvedAssetId]);
+
+  const atomicRows: TxFieldRow[] = useMemo(() => {
+    const rows = [...sections.atomic];
+    if (resolvedAssetId && !rows.some((r) => r.value === resolvedAssetId)) {
+      rows.unshift({
+        label: 'Process ID',
+        value: resolvedAssetId,
+        mono: true,
+        href: portalHyperbeamAssetUrl(resolvedAssetId),
+      });
+    }
+    return rows;
+  }, [sections.atomic, resolvedAssetId]);
 
   const isCurrent = playerTrack && currentTrack?.id === playerTrack.id;
 
@@ -223,7 +330,9 @@ export function TrackDetail() {
           </p>
           <div className={styles.badges}>
             {isAudio && <span className={styles.badge}>Audio</span>}
+            {resolvedAssetId && <span className={styles.badge}>Atomic Asset</span>}
             {data.graphqlFallback && <span className={styles.badge}>GraphQL metadata</span>}
+            {assetMetadataFallback && <span className={styles.badge}>HB metadata</span>}
             {data.status?.confirmed && <span className={styles.badge}>Confirmed</span>}
             {contentType && <span className={styles.badge}>{contentType}</span>}
           </div>
@@ -251,6 +360,12 @@ export function TrackDetail() {
         </div>
       </header>
 
+      {resolvedAssetId ? (
+        <section className={styles.section + ' glass'}>
+          <ListOnUcm assetId={resolvedAssetId} title={title} compact />
+        </section>
+      ) : null}
+
       <section className={styles.section + ' glass'}>
         <h2 className={styles.sectionTitle}>Transaction</h2>
         <div className={styles.fieldGrid}>
@@ -260,14 +375,12 @@ export function TrackDetail() {
         </div>
       </section>
 
-      <TagSection
-        title="Identity"
-        rows={sections.identity.filter((r) => r.label !== 'Description')}
-      />
+      <TagSection title="Identity" rows={sections.identity.filter((r) => r.label !== 'Description')} />
       <TagSection title="Media" rows={sections.media} />
       <TagSection title="App" rows={sections.app} />
       <TagSection title="License / UDL" rows={sections.license} />
       <TagSection title="Royalties" rows={sections.royalties} />
+      <TagSection title="Atomic asset" rows={atomicRows} />
       <TagSection title="Audius" rows={sections.audius} />
       <OtherTagsTable tags={sections.other} />
 

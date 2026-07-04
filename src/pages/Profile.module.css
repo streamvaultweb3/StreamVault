@@ -2,6 +2,212 @@
   width: 100%;
 }
 
+.profileHero {
+  position: relative;
+  overflow: hidden;
+  margin-bottom: 24px;
+  border-radius: var(--radius-xl);
+  border: 1px solid var(--bg-glass-border);
+  min-height: 220px;
+  background:
+    linear-gradient(135deg, rgba(40, 32, 72, 0.95), rgba(18, 28, 48, 0.92));
+  background-size: cover;
+  background-position: center;
+}
+
+.profileHeroOverlay {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    to top,
+    rgba(6, 6, 10, 0.94) 0%,
+    rgba(6, 6, 10, 0.62) 48%,
+    rgba(6, 6, 10, 0.28) 100%
+  );
+  pointer-events: none;
+}
+
+.profileHeroBanner {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  z-index: 0;
+}
+
+.profileHeroActions {
+  position: absolute;
+  right: 16px;
+  bottom: 16px;
+  z-index: 2;
+}
+
+.profileHeroTopActions {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.profileHeroShareBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  font-size: var(--text-sm);
+  font-weight: var(--font-semibold);
+  color: #fff;
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+.profileHeroShareBtn:hover {
+  background: rgba(0, 0, 0, 0.58);
+}
+
+.profileHeroEditBtn {
+  padding: 8px 14px;
+  font-size: var(--text-sm);
+  font-weight: var(--font-semibold);
+  color: #fff;
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+.profileHeroEditBtn:hover {
+  background: rgba(0, 0, 0, 0.58);
+}
+
+.profileHeroContent {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: flex-end;
+  gap: 20px;
+  padding: 24px;
+  min-height: 220px;
+}
+
+.profileHeroAvatar,
+.profileHeroAvatarPlaceholder {
+  width: 96px;
+  height: 96px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  border: 3px solid rgba(255, 255, 255, 0.18);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+.profileHeroAvatar {
+  object-fit: cover;
+  background: var(--bg-elevated);
+}
+
+.profileHeroAvatarPlaceholder {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.profileHeroText {
+  min-width: 0;
+  padding-bottom: 4px;
+}
+
+.profileHeroTitle {
+  font-size: var(--text-2xl);
+  font-weight: var(--font-bold);
+  color: #fff;
+  margin-bottom: 4px;
+  text-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.9),
+    0 0 12px rgba(0, 0, 0, 0.65);
+}
+
+.profileHeroHandle,
+.profileHeroBio,
+.profileHeroBioMuted {
+  font-size: var(--text-sm);
+  color: rgba(255, 255, 255, 0.88);
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.85);
+  margin-top: 8px;
+}
+
+.profileHeroBioMuted {
+  color: rgba(255, 255, 255, 0.58);
+  margin-top: 6px;
+}
+
+.profileHeroIdRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.profileHeroCopyBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  color: rgba(255, 255, 255, 0.82);
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.profileHeroCopyBtn:hover {
+  background: rgba(0, 0, 0, 0.52);
+  color: #fff;
+}
+
+.profileHeroBioExpand {
+  display: inline;
+  padding: 0;
+  margin: 0;
+  font-size: inherit;
+  font-weight: var(--font-semibold);
+  color: rgba(255, 255, 255, 0.92);
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.85);
+}
+
+.profileHeroBioExpand:hover {
+  text-decoration: underline;
+}
+
+.profileHeroMeta {
+  font-size: var(--text-sm);
+  color: rgba(255, 255, 255, 0.72);
+  font-family: monospace;
+  margin-top: 0;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.85);
+}
+
+.profileHeroWalletType {
+  display: inline-block;
+  margin-top: 8px;
+  font-size: var(--text-xs);
+  color: rgba(255, 255, 255, 0.72);
+  text-transform: capitalize;
+}
+
 .header {
   display: flex;
   align-items: center;

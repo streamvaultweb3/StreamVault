@@ -2,18 +2,20 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { trackDetailPath } from '../lib/arweaveTxDetail';
 import type { UploadedTrackRecord } from '../lib/uploadedTracks';
-import { uploadedTrackLicenseBadges, uploadedTrackShareUrl } from '../lib/uploadedTracks';
+import { uploadedTrackCompactBadges, uploadedTrackLicenseBadges, uploadedTrackShareUrl } from '../lib/uploadedTracks';
 import styles from './UploadedTrackMeta.module.css';
 
 interface UploadedTrackMetaProps {
   track: UploadedTrackRecord;
   compact?: boolean;
+  /** Hide badge row (e.g. when badges render in parent). */
+  hideBadges?: boolean;
 }
 
-export function UploadedTrackMeta({ track, compact = false }: UploadedTrackMetaProps) {
+export function UploadedTrackMeta({ track, compact = false, hideBadges = false }: UploadedTrackMetaProps) {
   const [copied, setCopied] = useState(false);
   const url = uploadedTrackShareUrl(track);
-  const badges = uploadedTrackLicenseBadges(track);
+  const badges = compact ? uploadedTrackCompactBadges(track) : uploadedTrackLicenseBadges(track);
 
   const handleCopy = async () => {
     try {
@@ -27,8 +29,8 @@ export function UploadedTrackMeta({ track, compact = false }: UploadedTrackMetaP
 
   return (
     <div className={compact ? `${styles.wrap} ${styles.wrapCompact}` : styles.wrap}>
-      {!compact && (
-        <div className={styles.badges}>
+      {!hideBadges && badges.length > 0 && (
+        <div className={compact ? `${styles.badges} ${styles.badgesCompact}` : styles.badges}>
           {badges.map((badge) => (
             <span key={badge} className={styles.badge}>{badge}</span>
           ))}

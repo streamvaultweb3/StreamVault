@@ -1,12 +1,16 @@
 import {
-  arweaveGraphqlEndpoint,
+  arweaveL1GraphqlEndpoint,
   arweaveTxDataUrl,
   arweaveTxMetaUrl,
   arweaveTxStatusUrls,
+  lunarTxExplorerUrl,
   normalizeArweaveTxId,
   turboTxDataUrl,
 } from './arweaveDataGateway';
 import { arweaveArtistPath, looksLikeWalletAddress } from './arweaveArtist';
+import { findAudioTxIdForAtomicAsset } from './arweaveDiscovery';
+import type { UploadedTrackRecord } from './uploadedTracks';
+import { udlConfigToTags } from './udl';
 
 export type ArweaveTag = { name: string; value: string };
 
@@ -19,11 +23,17 @@ export type ParsedTrackTags = {
   royalties: TxFieldRow[];
   audius: TxFieldRow[];
   app: TxFieldRow[];
+  atomic: TxFieldRow[];
   other: ArweaveTag[];
 };
 
 export type ArweaveTxExplorerData = {
+  /** Route / URL transaction id (may be AO process spawn). */
   txId: string;
+  /** Canonical L1 audio data tx when `txId` is a process or tags were supplemented. */
+  audioTxId?: string;
+  /** AO atomic asset process id when known (same as `txId` on process routes). */
+  processId?: string;
   metaUrl: string;
   transaction: {
     id: string;
@@ -56,6 +66,7 @@ const IDENTITY_KEYS = new Set([
   'Description',
   'Artist-Address',
   'Duration-Seconds',
+  'Genre',
 ]);
 const MEDIA_KEYS = new Set([
   'Type',
@@ -67,6 +78,54 @@ const MEDIA_KEYS = new Set([
 ]);
 const APP_KEYS = new Set(['App-Name', 'App-Version', 'Protocol-Name', 'Protocol-Version']);
 const AUDIUS_KEYS = new Set(['Audius-Track-Id', 'Audius-User-Id']);
+const ATOMIC_KEYS = new Set(['Track-Id', 'Data-Protocol', 'Asset-Type', 'Variant']);
+
+/** Union tag lists; later sources override earlier values for the same name. */
+export function mergeArweaveTags(
+  ...sources: (ArweaveTag[] | null | undefined)[]
+): ArweaveTag[] {
+  const byName = new Map<string, string>();
+  for (const source of sources) {
+    if (!source?.length) continue;
+    for (const { name, value } of source) {
+      const n = String(name || '').trim();
+      const v = String(value ?? '').trim();
+      if (n && v) byName.set(n, v);
+    }
+  }
+  return [...byName.entries()].map(([name, value]) => ({ name, value }));
+}
+
+/** Reconstruct Arweave tags from a local upload ledger entry (browser publish cache). */
+export function uploadRecordToArweaveTags(record: UploadedTrackRecord): ArweaveTag[] {
+  const tags: ArweaveTag[] = [{ name: 'App-Name', value: 'StreamVault' }];
+  if (record.title) tags.push({ name: 'Title', value: record.title });
+  if (record.artist) tags.push({ name: 'Artist', value: record.artist });
+  if (record.walletAddress) tags.push({ name: 'Creator', value: record.walletAddress });
+  if (record.description) tags.push({ name: 'Description', value: record.description });
+  if (record.contentType) tags.push({ name: 'Content-Type', value: record.contentType });
+  if (record.artworkTxId) tags.push({ name: 'Artwork-Tx-Id', value: record.artworkTxId });
+  if (record.audiusTrackId) tags.push({ name: 'Audius-Track-Id', value: record.audiusTrackId });
+  if (record.assetId) tags.push({ name: 'Track-Id', value: record.assetId });
+  if (record.udl) {
+    tags.push(
+      ...udlConfigToTags({
+        licenseId: record.udl.licenseId,
+        uri: record.udl.uri,
+        usage: record.udl.usage,
+        aiUse: record.udl.aiUse,
+        fee: record.udl.fee,
+        currency: record.udl.currency,
+        interval: record.udl.interval,
+        attribution: record.udl.attribution,
+      })
+    );
+  }
+  if (record.splits?.length) {
+    tags.push({ name: 'Royalties-Splits', value: JSON.stringify(record.splits) });
+  }
+  return tags;
+}
 
 export function trackDetailPath(txId: string): string {
   return `/track/${normalizeArweaveTxId(txId)}`;
@@ -83,6 +142,29 @@ function winstonToAr(winston: string | number | undefined): string | undefined {
 
 function getTag(tags: ArweaveTag[], name: string): string | undefined {
   return tags.find((t) => t.name === name)?.value;
+}
+
+const AUDIO_TX_TAG_NAMES = ['Track-AudioTx', 'Bootloader-AudioTxId', 'Data-Source'] as const;
+
+/** Linked L1 audio upload id from AO spawn / atomic asset tags. */
+export function audioTxIdFromTags(tags: ArweaveTag[]): string | undefined {
+  for (const name of AUDIO_TX_TAG_NAMES) {
+    const value = String(getTag(tags, name) || '').trim();
+    if (value) return value;
+  }
+  return undefined;
+}
+
+/** True when tags describe an AO atomic-asset process spawn (not the L1 audio data tx). */
+export function isAoAtomicProcessTags(tags: ArweaveTag[]): boolean {
+  if (getTag(tags, 'Data-Protocol') !== 'ao') return false;
+  if (getTag(tags, 'Type') === 'Process') return true;
+  return /atomic/i.test(getTag(tags, 'Asset-Type') || '');
+}
+
+function hasTrackMetadataTags(tags: ArweaveTag[]): boolean {
+  if (getTag(tags, 'Title') || getTag(tags, 'Artist')) return true;
+  return tags.some((t) => t.name.startsWith(LICENSE_PREFIX));
 }
 
 export function isAudioContentType(contentType?: string): boolean {
@@ -136,6 +218,7 @@ export function parseTrackTagSections(tags: ArweaveTag[]): ParsedTrackTags {
   const royalties: TxFieldRow[] = [];
   const audius: TxFieldRow[] = [];
   const app: TxFieldRow[] = [];
+  const atomic: TxFieldRow[] = [];
   const other: ArweaveTag[] = [];
   const consumed = new Set<string>();
 
@@ -161,6 +244,8 @@ export function parseTrackTagSections(tags: ArweaveTag[]): ParsedTrackTags {
   }
   if (description) push(identity, 'Description', description);
   if (duration) push(identity, 'Duration', `${duration}s`);
+  const genre = getTag(tags, 'Genre');
+  if (genre) push(identity, 'Genre', genre);
 
   const contentType = getTag(tags, 'Content-Type');
   const type = getTag(tags, 'Type');
@@ -215,6 +300,29 @@ export function parseTrackTagSections(tags: ArweaveTag[]): ParsedTrackTags {
     }
   }
 
+  const trackId = getTag(tags, 'Track-Id');
+  if (trackId) {
+    push(atomic, 'Track-Id (asset process)', trackId, { mono: true });
+    consumed.add('Track-Id');
+  }
+  const dataProtocol = getTag(tags, 'Data-Protocol');
+  const assetType = getTag(tags, 'Asset-Type');
+  const variant = getTag(tags, 'Variant');
+  if (dataProtocol) {
+    push(atomic, 'Data-Protocol', dataProtocol);
+    consumed.add('Data-Protocol');
+  }
+  if (assetType) {
+    push(atomic, 'Asset-Type', assetType);
+    consumed.add('Asset-Type');
+  }
+  if (variant) {
+    push(atomic, 'Variant', variant);
+    consumed.add('Variant');
+  }
+
+  if (getTag(tags, 'License-Currency')) consumed.add('Currency');
+
   for (const t of tags) {
     if (
       consumed.has(t.name) ||
@@ -222,6 +330,7 @@ export function parseTrackTagSections(tags: ArweaveTag[]): ParsedTrackTags {
       MEDIA_KEYS.has(t.name) ||
       APP_KEYS.has(t.name) ||
       AUDIUS_KEYS.has(t.name) ||
+      ATOMIC_KEYS.has(t.name) ||
       t.name.startsWith(LICENSE_PREFIX) ||
       t.name === 'Royalties-Splits'
     ) {
@@ -230,7 +339,7 @@ export function parseTrackTagSections(tags: ArweaveTag[]): ParsedTrackTags {
     other.push(t);
   }
 
-  return { identity, media, license, royalties, audius, app, other };
+  return { identity, media, license, royalties, audius, app, atomic, other };
 }
 
 async function fetchJson(url: string): Promise<{ ok: boolean; status: number; json?: unknown }> {
@@ -314,7 +423,7 @@ async function fetchTxGraphql(txId: string): Promise<{
       }
     }
   `;
-  const endpoint = (import.meta as any).env?.VITE_ARWEAVE_GQL_URL || arweaveGraphqlEndpoint();
+  const endpoint = arweaveL1GraphqlEndpoint();
   try {
     const res = await fetch(endpoint, {
       method: 'POST',
@@ -340,34 +449,138 @@ async function fetchTxGraphql(txId: string): Promise<{
   }
 }
 
-export async function fetchArweaveTxExplorer(rawTxId: string): Promise<ArweaveTxExplorerData> {
-  const txId = normalizeArweaveTxId(rawTxId);
-  const warnings: string[] = [];
+type TxBundle = {
+  txId: string;
+  transaction: ArweaveTxExplorerData['transaction'];
+  status: ArweaveTxExplorerData['status'];
+  gql: Awaited<ReturnType<typeof fetchTxGraphql>>;
+  tags: ArweaveTag[];
+  graphqlUsed: boolean;
+};
+
+async function loadTxBundle(txId: string): Promise<TxBundle> {
   const [transaction, status, gql] = await Promise.all([
     fetchTxMeta(txId),
     fetchTxStatus(txId),
     fetchTxGraphql(txId),
   ]);
 
-  let graphqlFallback = false;
-  let mergedTx = transaction;
-  let blockTimestamp = gql?.blockTimestamp;
+  const metaTags = transaction?.tags ?? [];
+  const gqlTags = gql?.tags ?? [];
+  const tags = mergeArweaveTags(metaTags, gqlTags);
+  const graphqlUsed = gqlTags.length > 0 && gqlTags.length >= metaTags.length;
 
-  if (!mergedTx?.tags?.length && gql?.tags?.length) {
-    graphqlFallback = true;
+  let mergedTx = transaction;
+  if (tags.length) {
+    mergedTx = mergedTx
+      ? {
+          ...mergedTx,
+          tags,
+          owner: mergedTx.owner || gql?.owner,
+          quantityAr: mergedTx.quantityAr || gql?.quantityAr,
+          dataSize: mergedTx.dataSize ?? gql?.dataSize,
+        }
+      : {
+          id: txId,
+          owner: gql?.owner,
+          quantityAr: gql?.quantityAr,
+          dataSize: gql?.dataSize,
+          tags,
+        };
+  }
+
+  return { txId, transaction: mergedTx, status, gql, tags, graphqlUsed };
+}
+
+export async function fetchArweaveTxExplorer(rawTxId: string): Promise<ArweaveTxExplorerData> {
+  const txId = normalizeArweaveTxId(rawTxId);
+  const warnings: string[] = [];
+  let graphqlFallback = false;
+
+  const primary = await loadTxBundle(txId);
+  let tags = primary.tags;
+  let mergedTx = primary.transaction;
+  let status = primary.status;
+  let blockTimestamp = primary.gql?.blockTimestamp;
+  if (primary.graphqlUsed) graphqlFallback = true;
+
+  let isProcess = isAoAtomicProcessTags(tags);
+  let processId = isProcess ? txId : undefined;
+  let audioTxId = isProcess ? audioTxIdFromTags(tags) : txId;
+
+  if (isProcess && !audioTxId) {
+    audioTxId = (await findAudioTxIdForAtomicAsset(txId)) || undefined;
+  }
+
+  if (!isProcess && !hasTrackMetadataTags(tags) && !primary.transaction) {
+    const maybeAudio = await findAudioTxIdForAtomicAsset(txId);
+    if (maybeAudio && maybeAudio !== txId) {
+      isProcess = true;
+      processId = txId;
+      audioTxId = maybeAudio;
+    }
+  }
+
+  if (!isProcess) {
+    const trackId = getTag(tags, 'Track-Id');
+    if (trackId && trackId !== txId) processId = trackId;
+  }
+
+  const shouldLoadAudio = Boolean(
+    isProcess ? audioTxId : audioTxId && audioTxId !== txId && !hasTrackMetadataTags(tags)
+  );
+
+  if (shouldLoadAudio && audioTxId && (isProcess || audioTxId !== txId)) {
+    const linkedAudioTxId = audioTxId;
+    const audio = await loadTxBundle(linkedAudioTxId);
+    if (audio.tags.length) {
+      tags = mergeArweaveTags(audio.tags, tags);
+      mergedTx = mergedTx
+        ? {
+            ...mergedTx,
+            tags,
+            owner: audio.transaction?.owner || mergedTx.owner,
+            quantityAr: audio.transaction?.quantityAr || mergedTx.quantityAr,
+            rewardAr: audio.transaction?.rewardAr || mergedTx.rewardAr,
+            dataSize: audio.transaction?.dataSize ?? mergedTx.dataSize,
+            format: audio.transaction?.format ?? mergedTx.format,
+            lastTx: audio.transaction?.lastTx || mergedTx.lastTx,
+          }
+        : audio.transaction
+          ? { ...audio.transaction, tags }
+          : {
+              id: linkedAudioTxId,
+              owner: audio.gql?.owner,
+              quantityAr: audio.gql?.quantityAr,
+              dataSize: audio.gql?.dataSize,
+              tags,
+            };
+
+      if (audio.status?.confirmed != null) status = audio.status;
+      blockTimestamp = audio.gql?.blockTimestamp ?? blockTimestamp;
+      audioTxId = linkedAudioTxId;
+
+      if (audio.graphqlUsed) graphqlFallback = true;
+      if (isProcess) {
+        warnings.push(
+          'Loaded L1 audio transaction metadata and merged with atomic asset process tags.'
+        );
+      } else if (tags.length > primary.tags.length) {
+        warnings.push('Supplemented sparse tags from linked L1 audio transaction.');
+      }
+    }
+  } else if (!isProcess) {
+    audioTxId = txId;
+  }
+
+  if (primary.graphqlUsed && primary.tags.length === 0) {
     warnings.push(
       'L1 transaction metadata was not available from /tx/{id}; showing tags from GraphQL (common for Turbo bundled data items).'
     );
-    mergedTx = {
-      id: txId,
-      owner: gql.owner,
-      quantityAr: gql.quantityAr,
-      dataSize: gql.dataSize,
-      tags: gql.tags,
-    };
-  } else if (mergedTx && gql?.tags?.length && mergedTx.tags.length === 0) {
-    mergedTx = { ...mergedTx, tags: gql.tags };
-    graphqlFallback = true;
+  } else if (primary.graphqlUsed && (primary.gql?.tags?.length ?? 0) > (primary.transaction?.tags?.length ?? 0)) {
+    warnings.push(
+      'GraphQL returned more tags than /tx/{id}; merged both sources (common for Turbo bundled data items).'
+    );
   }
 
   if (!status?.confirmed && !graphqlFallback) {
@@ -380,9 +593,13 @@ export async function fetchArweaveTxExplorer(rawTxId: string): Promise<ArweaveTx
     warnings.push('Could not load transaction metadata for this id.');
   }
 
+  const displayTxId = audioTxId && isProcess ? audioTxId : txId;
+
   return {
     txId,
-    metaUrl: arweaveTxMetaUrl(txId),
+    audioTxId: audioTxId || undefined,
+    processId,
+    metaUrl: arweaveTxMetaUrl(displayTxId),
     transaction: mergedTx,
     status,
     blockTimestamp,
@@ -395,9 +612,22 @@ export function explorerTransactionRows(
   data: ArweaveTxExplorerData
 ): TxFieldRow[] {
   const tx = data.transaction;
+  const displayTxId =
+    data.audioTxId && data.processId && data.audioTxId !== data.txId
+      ? data.audioTxId
+      : data.txId;
   const rows: TxFieldRow[] = [
-    { label: 'Transaction ID', value: data.txId, mono: true },
+    { label: 'Transaction ID', value: displayTxId, mono: true },
   ];
+
+  if (data.processId && data.processId !== displayTxId) {
+    rows.push({
+      label: 'Process ID',
+      value: data.processId,
+      mono: true,
+      href: lunarTxExplorerUrl(data.processId),
+    });
+  }
 
   if (data.status?.httpStatus != null) {
     rows.push({ label: 'Status HTTP', value: String(data.status.httpStatus) });
@@ -450,7 +680,7 @@ export function explorerTransactionRows(
   rows.push({
     label: 'Data URL',
     value: 'Open raw data',
-    href: arweaveTxDataUrl(data.txId),
+    href: arweaveTxDataUrl(displayTxId),
   });
 
   return rows;

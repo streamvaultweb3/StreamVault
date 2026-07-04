@@ -4,16 +4,24 @@ import { useWallet } from '../context/WalletContext';
 import { useAudiusAuth } from '../context/AudiusAuthContext';
 import { usePermaweb } from '../context/PermawebContext';
 import {
-  getProfileAvatar,
+  collectProfileAssetRefs,
+  getProfileBanner,
+  getProfileDisplayName,
   getProfileHandle,
+  getProfileByIdSafe,
+  getProfileReadLibs,
   getSelectedOrLatestProfileByWallet,
   getStoredProfileOverrideId,
+  invalidateLatestProfileCache,
+  profileOwnedByWallet,
+  resolveProfilePublicPath,
 } from '../lib/permaProfile';
+import { useArweaveMediaSources } from '../hooks/useArweaveMediaSources';
 import { resolveProfileTokens, type ResolvedProfileToken } from '../lib/profileTokens';
 import { createPortal } from 'react-dom';
 import { PublishModal } from './PublishModal';
 import { WanderConnectModal } from './WanderConnectModal';
-import { ARWEAVE_DATA_GATEWAY_BASE, arweaveTxDataUrl } from '../lib/arweaveDataGateway';
+import { ARWEAVE_DATA_GATEWAY_BASE } from '../lib/arweaveDataGateway';
 import { createFiatTopUpSession } from '../lib/publish';
 import { fetchTurboBalance, formatTurboCredits, type TurboBalance } from '../lib/turboCredits';
 import { ensureWanderConnect, openWanderConnect } from '../lib/wanderConnect';
@@ -54,12 +62,6 @@ function connectStageText(stage: ConnectStage): string {
   }
 }
 
-function resolveProfileImage(raw: unknown): string | null {
-  if (typeof raw !== 'string' || !raw) return null;
-  if (raw.startsWith('http') || raw.startsWith('data:')) return raw;
-  return arweaveTxDataUrl(raw);
-}
-
 function getProfileSnapshotKey(walletAddress: string) {
   return `streamvault:profileSnapshot:${walletAddress.toLowerCase()}`;
 }
@@ -97,6 +99,17 @@ function DiscordIcon() {
   );
 }
 
+function CopyIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" width="14" height="14">
+      <path
+        fill="currentColor"
+        d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"
+      />
+    </svg>
+  );
+}
+
 export function Layout({ children }: { children: React.ReactNode }) {
   const { walletType, address, connect, disconnect, isConnecting } = useWallet();
   const { libs, isReady } = usePermaweb();
@@ -123,7 +136,10 @@ export function Layout({ children }: { children: React.ReactNode }) {
   );
   const connectPollIntervalRef = React.useRef<number | null>(null);
   const connectPollTimeoutRef = React.useRef<number | null>(null);
+  const walletMenuWrapRef = React.useRef<HTMLDivElement | null>(null);
+  const mobileWalletMenuWrapRef = React.useRef<HTMLDivElement | null>(null);
   const lastTrackedAddressRef = React.useRef<string | null>(null);
+  const profileRef = React.useRef<any | null>(null);
   const aoTokens = React.useMemo(
     () => profileTokens.filter((item) => item.kind === 'ao-token'),
     [profileTokens]
@@ -145,19 +161,50 @@ export function Layout({ children }: { children: React.ReactNode }) {
     return { ...profile, ...store };
   }, [profile, libs]);
 
-  const profileAvatar = React.useMemo(() => {
-    const url = getProfileAvatar(normalizedProfile);
-    if (url) return url;
-    const raw = normalizedProfile?.thumbnail || normalizedProfile?.avatar || normalizedProfile?.image || null;
-    return resolveProfileImage(raw);
-  }, [normalizedProfile]);
+  const profileAssets = React.useMemo(
+    () => (normalizedProfile ? collectProfileAssetRefs(normalizedProfile) : []),
+    [normalizedProfile]
+  );
+
+  React.useEffect(() => {
+    profileRef.current = profile;
+  }, [profile]);
+
+  const avatarRaw = React.useMemo(
+    () => normalizedProfile?.thumbnail || normalizedProfile?.avatar || normalizedProfile?.image || null,
+    [normalizedProfile]
+  );
+  const { src: profileAvatar, onError: onProfileAvatarError } = useArweaveMediaSources(avatarRaw);
 
   const profileHref = React.useMemo(() => {
-    if (address) return `/profile/${address}`;
-    if (normalizedProfile?.id) return `/profile/${String(normalizedProfile.id)}`;
-    if (cachedProfileId) return `/profile/${cachedProfileId}`;
-    return '/';
-  }, [address, cachedProfileId, normalizedProfile?.id]);
+    const ownedProfileId =
+      normalizedProfile?.id && address && profileOwnedByWallet(normalizedProfile, address)
+        ? String(normalizedProfile.id)
+        : null;
+    return resolveProfilePublicPath({
+      walletAddress: address,
+      profileId: ownedProfileId,
+      cachedProfileId,
+    });
+  }, [address, cachedProfileId, normalizedProfile]);
+
+  const profileEditHref = React.useMemo(() => {
+    if (!normalizedProfile?.id) return profileHref;
+    return { pathname: profileHref, search: '?edit=1' };
+  }, [normalizedProfile?.id, profileHref]);
+
+  const profileBannerUrl = React.useMemo(() => getProfileBanner(normalizedProfile), [normalizedProfile]);
+
+  const profileDisplayName = React.useMemo(
+    () => getProfileDisplayName(normalizedProfile) || getProfileHandle(normalizedProfile) || 'Profile',
+    [normalizedProfile]
+  );
+
+  const profileIdShort = React.useMemo(() => {
+    if (!normalizedProfile?.id) return '';
+    const id = String(normalizedProfile.id);
+    return id.length > 18 ? `${id.slice(0, 14)}…` : id;
+  }, [normalizedProfile?.id]);
 
   React.useEffect(() => {
     const sync = () => setIsOffline(!navigator.onLine);
@@ -168,6 +215,18 @@ export function Layout({ children }: { children: React.ReactNode }) {
       window.removeEventListener('offline', sync);
     };
   }, []);
+
+  React.useEffect(() => {
+    if (!showWalletMenu) return;
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (walletMenuWrapRef.current?.contains(target)) return;
+      if (mobileWalletMenuWrapRef.current?.contains(target)) return;
+      setShowWalletMenu(false);
+    };
+    document.addEventListener('pointerdown', onPointerDown);
+    return () => document.removeEventListener('pointerdown', onPointerDown);
+  }, [showWalletMenu]);
 
   React.useEffect(() => {
     if (address) {
@@ -247,12 +306,13 @@ export function Layout({ children }: { children: React.ReactNode }) {
   }, [address]);
 
   React.useEffect(() => {
-    (async () => {
-      if (!address || walletType !== 'arweave' || !showWalletMenu) {
-        return;
-      }
-      await refreshTurboBalance().catch(() => {});
-    })();
+    if (!address || walletType !== 'arweave' || !showWalletMenu) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      refreshTurboBalance().catch(() => {});
+    }, 400);
+    return () => window.clearTimeout(timer);
   }, [address, walletType, showWalletMenu, refreshTurboBalance]);
 
   React.useEffect(() => {
@@ -273,36 +333,52 @@ export function Layout({ children }: { children: React.ReactNode }) {
       return;
     }
     let cancelled = false;
-    setArBalanceLoading(true);
-    fetch(`${ARWEAVE_DATA_GATEWAY_BASE}/wallet/${address}/balance`)
-      .then((r) => r.text())
-      .then((raw) => {
-        if (cancelled) return;
-        const winston = raw ? Number(raw) : 0;
-        const ar = Number.isFinite(winston) ? winston / 1e12 : 0;
-        setArBalance(ar.toFixed(6));
-      })
-      .catch(() => {
-        if (!cancelled) setArBalance(null);
-      })
-      .finally(() => {
-        if (!cancelled) setArBalanceLoading(false);
-      });
+    const timer = window.setTimeout(() => {
+      if (cancelled) return;
+      setArBalanceLoading(true);
+      fetch(`${ARWEAVE_DATA_GATEWAY_BASE}/wallet/${address}/balance`)
+        .then((r) => {
+          if (!r.ok) throw new Error(`AR balance request failed (${r.status})`);
+          return r.text();
+        })
+        .then((raw) => {
+          if (cancelled) return;
+          const winston = raw ? Number(raw) : 0;
+          const ar = Number.isFinite(winston) ? winston / 1e12 : 0;
+          setArBalance(ar.toFixed(6));
+        })
+        .catch(() => {
+          if (!cancelled) setArBalance(null);
+        })
+        .finally(() => {
+          if (!cancelled) setArBalanceLoading(false);
+        });
+    }, 4000);
     return () => {
       cancelled = true;
+      window.clearTimeout(timer);
     };
   }, [address, walletType]);
 
   React.useEffect(() => {
+    setProfile(null);
+    setProfileTokens([]);
+    profileRef.current = null;
+    if (address) invalidateLatestProfileCache(address);
+  }, [address]);
+
+  React.useEffect(() => {
     if (!isReady || !libs || !address) {
-      setProfile(null);
       return;
     }
     try {
       const raw = localStorage.getItem(getProfileSnapshotKey(address));
       if (raw) {
         const cached = JSON.parse(raw);
-        if (cached?.id) setProfile(cached);
+        if (cached?.id && profileOwnedByWallet(cached, address)) {
+          setProfile(cached);
+          profileRef.current = cached;
+        }
       }
     } catch {
       // ignore snapshot parse errors
@@ -313,26 +389,36 @@ export function Layout({ children }: { children: React.ReactNode }) {
       try {
         const overrideId = getStoredProfileOverrideId(address);
         let loaded: any = null;
-        if (overrideId && libs.getProfileById) {
-          loaded = await libs.getProfileById(overrideId);
-          if (!loaded?.id) loaded = null;
+        if (overrideId) {
+          loaded = await getProfileByIdSafe(libs, overrideId);
         }
         if (!loaded) {
-          loaded = await getSelectedOrLatestProfileByWallet(libs, address, { useOverride: true });
+          loaded = await getSelectedOrLatestProfileByWallet(libs, address, {
+            useOverride: true,
+            timeoutMs: 15_000,
+          });
         }
         if (!cancelled) {
-          const next = loaded?.id ? loaded : profile?.id ? profile : null;
-          if (next) setProfile(next);
-          if (next?.id) {
+          const next =
+            loaded?.id && profileOwnedByWallet(loaded, address) ? loaded : null;
+          if (next) {
+            setProfile(next);
+            profileRef.current = next;
             try {
               localStorage.setItem(getProfileSnapshotKey(address), JSON.stringify(next));
             } catch {
               // ignore storage failures
             }
+          } else {
+            setProfile(null);
+            profileRef.current = null;
           }
         }
       } catch {
-        // preserve any cached/optimistic profile if refresh fails
+        // preserve snapshot only when it belongs to this wallet
+        if (!cancelled && !profileRef.current?.id) {
+          setProfile(null);
+        }
       } finally {
         if (!cancelled) setProfileLoading(false);
       }
@@ -340,7 +426,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [address, isReady, libs, profile]);
+  }, [address, isReady, libs]);
 
   React.useEffect(() => {
     const onProfileUpdated = (event: Event) => {
@@ -374,12 +460,12 @@ export function Layout({ children }: { children: React.ReactNode }) {
   React.useEffect(() => {
     let cancelled = false;
     (async () => {
-      if (!libs || !Array.isArray(normalizedProfile?.assets) || normalizedProfile.assets.length === 0) {
+      if (!libs || profileAssets.length === 0) {
         setProfileTokens([]);
         return;
       }
       try {
-        const resolved = await resolveProfileTokens(libs, normalizedProfile.assets);
+        const resolved = await resolveProfileTokens(libs, profileAssets, getProfileReadLibs(libs));
         if (!cancelled) setProfileTokens(resolved);
       } catch {
         if (!cancelled) setProfileTokens([]);
@@ -388,7 +474,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [libs, normalizedProfile?.assets]);
+  }, [libs, profileAssets]);
 
   React.useEffect(() => {
     setUserProperties({
@@ -412,11 +498,6 @@ export function Layout({ children }: { children: React.ReactNode }) {
     } catch {
       // ignore clipboard failures
     }
-  }, []);
-
-  const openAudiusLogin = React.useCallback(() => {
-    if (typeof window === 'undefined') return;
-    window.open('https://audius.co/login', '_blank', 'noopener,noreferrer');
   }, []);
 
   const openTurboTopUp = React.useCallback(() => {
@@ -533,45 +614,70 @@ export function Layout({ children }: { children: React.ReactNode }) {
 
   const walletMenuContent = address ? (
     <>
-      <span className={styles.walletMenuType}>{walletType}</span>
-      {walletType === 'arweave' && (
-        <span className={styles.walletMenuSubtle}>
-          {arBalanceLoading ? 'Loading AR balance…' : arBalance != null ? `${arBalance} AR L1` : 'AR balance unavailable'}
-        </span>
-      )}
-      {profileLoading && <span className={styles.walletMenuType}>Loading profile…</span>}
-      {connectError && <span className={styles.walletMenuError}>{connectError}</span>}
       {normalizedProfile?.id && (
-        <div className={styles.walletMenuSection}>
-          <span className={styles.walletMenuType}>
-            {normalizedProfile.displayName || normalizedProfile.username || 'Permaweb profile'}
-          </span>
-          <span className={styles.walletMenuType}>{String(normalizedProfile.id).slice(0, 14)}…</span>
+        <div
+          className={styles.walletMenuBanner}
+          style={profileBannerUrl ? { backgroundImage: `url(${profileBannerUrl})` } : undefined}
+        >
+          <div className={styles.walletMenuBannerOverlay} aria-hidden />
+          <div className={styles.walletMenuBannerContent}>
+            <span className={styles.walletMenuBannerName}>{profileDisplayName}</span>
+            <div className={styles.walletMenuBannerIdRow}>
+              <span className={styles.walletMenuBannerId} title={String(normalizedProfile.id)}>
+                {profileIdShort}
+              </span>
+              <button
+                type="button"
+                className={styles.walletMenuCopyBtn}
+                aria-label={copiedKey === 'profile' ? 'Copied profile id' : 'Copy profile id'}
+                title={copiedKey === 'profile' ? 'Copied' : 'Copy profile id'}
+                onClick={() => copyText(String(normalizedProfile.id), 'profile')}
+              >
+                {copiedKey === 'profile' ? '✓' : <CopyIcon />}
+              </button>
+            </div>
+          </div>
         </div>
       )}
-      {walletType === 'arweave' && (
-        <div className={styles.walletMenuSection}>
-          <span className={styles.turboHeading}>Turbo credits</span>
-          <button
-            type="button"
-            className={styles.turboHeaderLink}
-            onClick={openTurboPricingCalculator}
-          >
-            Size Calculator
-          </button>
-          {turboLoading ? (
-            <span className={styles.walletMenuType}>Loading Turbo credits…</span>
-          ) : turboBalance ? (
-            <>
-              <div className={styles.turboBalanceRow}>
-                <span className={styles.turboBalanceLabel}>Balance</span>
+      <div className={styles.walletMenuBody}>
+        {profileLoading && !normalizedProfile?.id && (
+          <span className={styles.walletMenuType}>Loading profile…</span>
+        )}
+        {connectError && <span className={styles.walletMenuError}>{connectError}</span>}
+        {walletType === 'arweave' && (
+          <div className={styles.walletMenuSection}>
+            <div className={styles.tokenBalancesHeader}>
+              <span className={styles.turboHeading}>Balances</span>
+              <button
+                type="button"
+                className={styles.turboHeaderLink}
+                onClick={openTurboPricingCalculator}
+              >
+                Size Calculator
+              </button>
+            </div>
+            <div className={styles.tokenBalanceGrid}>
+              <div className={styles.tokenBalanceRow}>
+                <span className={styles.turboBalanceLabel}>Turbo</span>
                 <span
                   className={styles.turboBalanceValue}
                   title="Turbo credits pay for Arweave uploads. Add credits directly, use Stripe checkout, or estimate upload cost with the size calculator."
                 >
-                  {formatTurboCredits(turboBalance.effectiveBalance)}
+                  {turboLoading
+                    ? '…'
+                    : turboBalance
+                      ? formatTurboCredits(turboBalance.effectiveBalance)
+                      : '—'}
                 </span>
               </div>
+              <div className={styles.tokenBalanceRow}>
+                <span className={styles.turboBalanceLabel}>AR</span>
+                <span className={styles.turboBalanceValue}>
+                  {arBalanceLoading ? '…' : arBalance ?? '—'}
+                </span>
+              </div>
+            </div>
+            {turboBalance && (
               <div className={styles.turboActions}>
                 <button
                   type="button"
@@ -589,38 +695,38 @@ export function Layout({ children }: { children: React.ReactNode }) {
                   {turboTopUpLoading ? 'Loading…' : 'Card'}
                 </button>
               </div>
-            </>
-          ) : (
-            <>
-              <span className={styles.walletMenuType}>Turbo credits unavailable.</span>
-              {turboError && <span className={styles.walletMenuError}>{turboError}</span>}
-            </>
-          )}
-        </div>
-      )}
-      <Link
-        to={profileHref}
-        className={styles.walletMenuAction}
-        onClick={() => setShowWalletMenu(false)}
-      >
-        Open profile
-      </Link>
-      <button
-        type="button"
-        className={styles.walletMenuAction}
-        onClick={() => copyText(address, 'wallet')}
-      >
-        {copiedKey === 'wallet' ? 'Copied wallet' : 'Copy wallet address'}
-      </button>
-      {normalizedProfile?.id && (
+            )}
+            {!turboLoading && !turboBalance && (
+              <>
+                <span className={styles.walletMenuType}>Turbo credits unavailable.</span>
+                {turboError && <span className={styles.walletMenuError}>{turboError}</span>}
+              </>
+            )}
+          </div>
+        )}
+        <Link
+          to={profileHref}
+          className={styles.walletMenuAction}
+          onClick={() => setShowWalletMenu(false)}
+        >
+          Open profile
+        </Link>
+        {normalizedProfile?.id && (
+          <Link
+            to={profileEditHref}
+            className={styles.walletMenuAction}
+            onClick={() => setShowWalletMenu(false)}
+          >
+            Edit profile
+          </Link>
+        )}
         <button
           type="button"
           className={styles.walletMenuAction}
-          onClick={() => copyText(String(normalizedProfile.id), 'profile')}
+          onClick={() => copyText(address, 'wallet')}
         >
-          {copiedKey === 'profile' ? 'Copied profile id' : 'Copy profile id'}
+          {copiedKey === 'wallet' ? 'Copied wallet' : 'Copy wallet address'}
         </button>
-      )}
       {aoTokens.length > 0 && (
         <div className={styles.walletMenuSection}>
           <span className={styles.walletMenuType}>AO tokens</span>
@@ -679,21 +785,11 @@ export function Layout({ children }: { children: React.ReactNode }) {
             <button
               type="button"
               className={styles.walletMenuAction}
-              onClick={openAudiusLogin}
-            >
-              Open Audius first
-            </button>
-            <button
-              type="button"
-              className={styles.walletMenuAction}
               disabled={isLoggingIn}
               onClick={() => login()}
             >
               {isLoggingIn ? 'Connecting Audius…' : 'Connect Audius'}
             </button>
-            <span className={styles.walletMenuType}>
-              Use email/social in Audius first if prompted for wallet verification.
-            </span>
           </>
         )}
         {authError && <span className={styles.walletMenuError}>{authError}</span>}
@@ -708,9 +804,10 @@ export function Layout({ children }: { children: React.ReactNode }) {
       >
         Disconnect Wallet
       </button>
+      </div>
     </>
   ) : (
-    <>
+    <div className={styles.walletMenuBody}>
       {connectError && <span className={styles.walletMenuError}>{connectError}</span>}
       {connectStage !== 'idle' && (
         <span className={styles.walletMenuStatus}>{connectStageText(connectStage)}</span>
@@ -745,7 +842,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
       <button type="button" className={styles.walletMenuAction} onClick={() => handleConnect('solana')}>
         Solana
       </button>
-    </>
+    </div>
   );
 
   return (
@@ -780,12 +877,17 @@ export function Layout({ children }: { children: React.ReactNode }) {
             </div>
           </Link>
           <nav className={`${styles.nav} ${mobileNavOpen ? styles.navOpen : ''}`}>
-            <div className={styles.mobileAccount}>
+            <div className={styles.mobileAccount} ref={mobileWalletMenuWrapRef}>
               {address ? (
                 <>
                   <div className={styles.mobileAccountIdentity}>
                     {profileAvatar ? (
-                      <img src={profileAvatar} alt="" className={styles.mobileAccountAvatar} />
+                      <img
+                        src={profileAvatar}
+                        alt=""
+                        className={styles.mobileAccountAvatar}
+                        onError={onProfileAvatarError}
+                      />
                     ) : (
                       <span className={styles.mobileAccountAvatarFallback} aria-hidden>
                         {address.slice(0, 1).toUpperCase()}
@@ -850,7 +952,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
             >
               Upload
             </button>
-            <div className={styles.walletWrap}>
+            <div className={styles.walletWrap} ref={walletMenuWrapRef}>
               <button
                 type="button"
                 className={`${styles.walletBtn} ${address ? styles.walletAvatarBtn : ''}`}
@@ -869,7 +971,12 @@ export function Layout({ children }: { children: React.ReactNode }) {
                   : address ? (
                     <span className={styles.walletBtnContent}>
                       {profileAvatar ? (
-                        <img src={profileAvatar} alt="" className={styles.walletAvatar} />
+                        <img
+                          src={profileAvatar}
+                          alt=""
+                          className={styles.walletAvatar}
+                          onError={onProfileAvatarError}
+                        />
                       ) : (
                         <span className={styles.walletAvatarFallback} aria-hidden>
                           {address.slice(0, 1).toUpperCase()}

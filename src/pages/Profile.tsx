@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useWallet } from '../context/WalletContext';
 import { usePermaweb } from '../context/PermawebContext';
 import { useAudiusAuth } from '../context/AudiusAuthContext';
@@ -19,13 +19,13 @@ import {
   type AudiusUser,
 } from '../lib/audius';
 import { CreateProfileModal } from '../components/CreateProfileModal';
+import { useArweaveMediaSources } from '../hooks/useArweaveMediaSources';
 import { UploadedTrackMeta } from '../components/UploadedTrackMeta';
 import { type RegisteredTrackRecord, searchTracksOnAO } from '../lib/aoMusicRegistry';
 import { getRoyaltyPayoutPlan } from '../lib/aoRoyaltyEngine';
 import {
   clearStoredProfileOverrideId,
-  getProfileAvatar,
-  getProfileBanner,
+  collectProfileAssetRefs,
   getProfileBio,
   getProfileDisplayName,
   getProfileHandle,
@@ -33,13 +33,35 @@ import {
   getProfileOptionsByWallet,
   getProfileByIdSafe,
   getSelectedOrLatestProfileByWallet,
+  getProfileReadLibs,
   getStoredProfileOverrideId,
+  inferProfileWalletAddress,
+  invalidateLatestProfileCache,
+  isLikelyArweaveAddressRef,
+  profileOwnedByWallet,
+  resolveProfileMediaUrls,
+  resolveProfileScheduler,
   setStoredProfileOverrideId,
+  shouldCanonicalizeProfileRoute,
 } from '../lib/permaProfile';
+import { resolveProfileZoneWriteNodeUrls } from '../lib/aoNode';
+import {
+  applyProfileZoneExtras,
+  buildPermawebProfileArgs,
+  buildPermawebProfileArgsWithTimeout,
+  connectArweaveSignerForProfile,
+  createPermawebProfile,
+  extractRawProfileMediaRef,
+  getWritableProfileLibs,
+  refreshProfileAfterWrite,
+  resolveArweaveSigner,
+  writeAndConfirmProfileUpdate,
+} from '../lib/profileWrite';
 import { resolveProfileTokens, type ResolvedProfileToken } from '../lib/profileTokens';
 import { PublishModal } from '../components/PublishModal';
 import { arweaveTxDataUrl, turboTxDataUrl } from '../lib/arweaveDataGateway';
-import { arweaveArtistPath } from '../lib/arweaveArtist';
+import { queryPermanentUploadsByOwner, queryAtomicAssetsByCreator, type AtomicAssetSummary } from '../lib/arweaveDiscovery';
+import { arweaveArtistPath, looksLikeWalletAddress } from '../lib/arweaveArtist';
 import { readUploadLedger } from '../lib/uploadLedger';
 import {
   matchUploadedTrackToAudiusTrack,
@@ -79,22 +101,10 @@ function getProfileSnapshotKey(walletAddress: string) {
   return `streamvault:profileSnapshot:${walletAddress.toLowerCase()}`;
 }
 
-function inferProfileWalletAddress(profile: any, fallback?: string | null): string | null {
-  const owner =
-    profile?.walletAddress ||
-    profile?.WalletAddress ||
-    profile?.owner ||
-    profile?.Owner ||
-    null;
-  if (typeof owner === 'string' && owner.trim()) return owner;
-  if (fallback && typeof fallback === 'string' && fallback.trim()) return fallback;
-  return null;
-}
-
-/** Arweave wallet + AO process ids are 43-char base64url (includes `_` and `-`). */
-function isLikelyArweaveAddressRef(ref: string | undefined): boolean {
-  if (!ref || ref.length !== 43) return false;
-  return /^[A-Za-z0-9_-]+$/.test(ref);
+function clearProfileSessionCaches() {
+  PROFILE_CACHE.clear();
+  PROFILE_OPTIONS_CACHE.clear();
+  PROFILE_TOKENS_CACHE.clear();
 }
 
 function fileToDataURL(file: File): Promise<string> {
@@ -106,13 +116,41 @@ function fileToDataURL(file: File): Promise<string> {
   });
 }
 
+function resolveProfileImages(raw: unknown): string[] {
+  return resolveProfileMediaUrls(raw);
+}
+
+function resolveArtworkUrl(raw: unknown): string | undefined {
+  return resolveProfileImages(raw)[0] || undefined;
+}
+
+function CopyIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" width="14" height="14">
+      <path
+        fill="currentColor"
+        d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"
+      />
+    </svg>
+  );
+}
+
+function ShareIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2">
+      <path d="M12 16V4m0 0 4 4m-4-4-4 4" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M5 20h14" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 function uploadedSampleToTrack(sample: LocalSample): Track {
   return {
     id: sample.txId,
     title: sample.title,
     artist: sample.artist || 'Unknown artist',
     artistId: sample.walletAddress || sample.txId,
-    artwork: sample.artworkTxId ? arweaveTxDataUrl(sample.artworkTxId) : sample.artworkUrl,
+    artwork: sample.artworkTxId ? resolveArtworkUrl(sample.artworkTxId) : sample.artworkUrl,
     streamUrl: uploadedTrackShareUrl(sample),
     isPermanent: true,
     permaTxId: sample.txId,
@@ -129,6 +167,8 @@ export function Profile() {
     if (profileDebug) console.info(...args);
   };
   const { address: routeProfileRef } = useParams<{ address: string }>();
+  const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { address: connectedAddress, walletType } = useWallet();
   const { audiusUser, login, logout, apiKeyConfigured, isLoggingIn, authError: audiusAuthError } = useAudiusAuth();
   const arweaveApi = useApi();
@@ -143,9 +183,12 @@ export function Profile() {
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [localSamples, setLocalSamples] = useState<LocalSample[]>([]);
+  const [chainProfileUploads, setChainProfileUploads] = useState<UploadedTrackRecord[]>([]);
+  const [chainAtomicAssets, setChainAtomicAssets] = useState<AtomicAssetSummary[]>([]);
   const [copiedTxId, setCopiedTxId] = useState<string | null>(null);
   const [copiedShareUrl, setCopiedShareUrl] = useState(false);
   const [copiedProfileId, setCopiedProfileId] = useState(false);
+  const [bioExpanded, setBioExpanded] = useState(false);
   const [audiusProfile, setAudiusProfile] = useState<AudiusUser | null>(null);
   const [audiusTracks, setAudiusTracks] = useState<AudiusTrack[]>([]);
   const [audiusAlbums, setAudiusAlbums] = useState<AudiusAlbum[]>([]);
@@ -174,6 +217,7 @@ export function Profile() {
   const [aoPublishedTracks, setAoPublishedTracks] = useState<RegisteredTrackRecord[]>([]);
   const [profileTokens, setProfileTokens] = useState<ResolvedProfileToken[]>([]);
   const tokenResolveTimerRef = useRef<number | null>(null);
+  const profileSaveInFlightRef = useRef(false);
   const aoTokens = useMemo(
     () => profileTokens.filter((item) => item.kind === 'ao-token'),
     [profileTokens]
@@ -203,12 +247,126 @@ export function Profile() {
     return raw ? String(raw) : null;
   }, [normalizedProfile]);
 
+  const cachedOwnProfileId = useMemo(() => {
+    if (!connectedAddress || typeof window === 'undefined') return '';
+    return localStorage.getItem(`streamvault:lastProfileId:${connectedAddress.toLowerCase()}`) || '';
+  }, [connectedAddress]);
+
+  const isWalletRoute = useMemo(() => {
+    if (!routeProfileRef || !connectedAddress) return false;
+    return routeProfileRef.toLowerCase() === connectedAddress.toLowerCase();
+  }, [routeProfileRef, connectedAddress]);
+
+  const prevConnectedAddressRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const connected = connectedAddress?.toLowerCase() || null;
+    const prev = prevConnectedAddressRef.current;
+
+    if (prev && connected && prev !== connected) {
+      clearProfileSessionCaches();
+      invalidateLatestProfileCache(prev);
+      invalidateLatestProfileCache(connectedAddress);
+      setProfile(null);
+      setProfileOverrideId('');
+      setProfileOverrideInput('');
+
+      const prevProfileId = localStorage.getItem(`streamvault:lastProfileId:${prev}`) || '';
+      const route = String(routeProfileRef || '').toLowerCase();
+      if (route && prevProfileId && route === prevProfileId.toLowerCase()) {
+        const goToProfile = (target: string) => navigate(`/profile/${target}`, { replace: true });
+        const cachedForWallet =
+          localStorage.getItem(`streamvault:lastProfileId:${connected}`) || '';
+        if (cachedForWallet) {
+          goToProfile(cachedForWallet);
+        } else if (libs && isReady && connectedAddress) {
+          void getSelectedOrLatestProfileByWallet(libs, connectedAddress, {
+            useOverride: true,
+            timeoutMs: 15_000,
+          }).then((resolved) => {
+            if (resolved?.id) {
+              localStorage.setItem(
+                `streamvault:lastProfileId:${connected}`,
+                String(resolved.id)
+              );
+              goToProfile(String(resolved.id));
+              return;
+            }
+            goToProfile(connectedAddress);
+          });
+        } else if (connectedAddress) {
+          goToProfile(connectedAddress);
+        }
+      }
+    }
+
+    if (!connectedAddress) {
+      clearProfileSessionCaches();
+      setProfile(null);
+    } else {
+      prevConnectedAddressRef.current = connected;
+    }
+  }, [connectedAddress, isReady, libs, navigate, routeProfileRef]);
+
+  useEffect(() => {
+    if (!isWalletRoute || !cachedOwnProfileId) return;
+    if (routeProfileRef === cachedOwnProfileId) return;
+    navigate(`/profile/${cachedOwnProfileId}`, { replace: true });
+  }, [cachedOwnProfileId, isWalletRoute, navigate, routeProfileRef]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const walletsToTry = new Set<string>();
+    if (connectedAddress) walletsToTry.add(connectedAddress.toLowerCase());
+    if (isWalletRoute && routeProfileRef) walletsToTry.add(routeProfileRef.toLowerCase());
+    const route = String(routeProfileRef || '').toLowerCase();
+    for (const wallet of walletsToTry) {
+      try {
+        const raw = localStorage.getItem(getProfileSnapshotKey(wallet));
+        if (!raw) continue;
+        const snapshot = JSON.parse(raw);
+        if (!snapshot?.id || !profileOwnedByWallet(snapshot, wallet)) continue;
+        const snapshotId = String(snapshot.id).toLowerCase();
+        if (route && route !== wallet && route !== snapshotId) continue;
+        setProfile((prev) => (prev?.id ? prev : snapshot));
+        PROFILE_CACHE.set(wallet, snapshot);
+        PROFILE_CACHE.set(snapshotId, snapshot);
+        if (route) PROFILE_CACHE.set(route, snapshot);
+        break;
+      } catch {
+        // ignore snapshot parse errors
+      }
+    }
+  }, [connectedAddress, isWalletRoute, routeProfileRef]);
+
   const isOwn = useMemo(() => {
     if (!connectedAddress) return false;
-    if (routeProfileRef && connectedAddress.toLowerCase() === routeProfileRef.toLowerCase()) return true;
-    if (profileWalletAddress && connectedAddress.toLowerCase() === profileWalletAddress.toLowerCase()) return true;
+    const connected = connectedAddress.toLowerCase();
+    const route = String(routeProfileRef || '').toLowerCase();
+    if (route && route === connected) return true;
+    if (profileWalletAddress && profileWalletAddress.toLowerCase() === connected) return true;
+    if (cachedOwnProfileId && route && route === cachedOwnProfileId.toLowerCase()) return true;
+    if (normalizedProfile?.id && route === String(normalizedProfile.id).toLowerCase()) {
+      const owner = profileWalletAddress || inferProfileWalletAddress(normalizedProfile, null);
+      if (owner && owner.toLowerCase() === connected) return true;
+    }
     return false;
-  }, [connectedAddress, profileWalletAddress, routeProfileRef]);
+  }, [connectedAddress, profileWalletAddress, routeProfileRef, cachedOwnProfileId, normalizedProfile]);
+
+  const uploadWalletAddress = useMemo(() => {
+    if (profileWalletAddress) return profileWalletAddress;
+    if (isOwn && connectedAddress) return connectedAddress;
+    if (routeProfileRef && looksLikeWalletAddress(routeProfileRef)) return routeProfileRef;
+    return null;
+  }, [profileWalletAddress, connectedAddress, isOwn, routeProfileRef]);
+
+  useEffect(() => {
+    if (searchParams.get('edit') !== '1' || !normalizedProfile?.id || !isOwn) return;
+    setEditOpen(true);
+    const next = new URLSearchParams(searchParams);
+    next.delete('edit');
+    setSearchParams(next, { replace: true });
+  }, [isOwn, normalizedProfile?.id, searchParams, setSearchParams]);
 
   const resolvedAddress = useMemo(() => {
     if (profileWalletAddress) return profileWalletAddress;
@@ -216,13 +374,86 @@ export function Profile() {
     return routeProfileRef || null;
   }, [connectedAddress, isOwn, profileWalletAddress, routeProfileRef]);
 
-  const avatarSource = useMemo(() => {
-    return getProfileAvatar(normalizedProfile);
-  }, [normalizedProfile]);
+  const avatarRaw = useMemo(
+    () =>
+      normalizedProfile?.thumbnail ||
+      normalizedProfile?.Thumbnail ||
+      normalizedProfile?.avatar ||
+      normalizedProfile?.image ||
+      normalizedProfile?.profileImage ||
+      normalizedProfile?.ProfileImage ||
+      null,
+    [normalizedProfile]
+  );
 
-  const bannerSource = useMemo(() => {
-    return getProfileBanner(normalizedProfile);
-  }, [normalizedProfile]);
+  const bannerRaw = useMemo(
+    () =>
+      normalizedProfile?.banner ||
+      normalizedProfile?.Banner ||
+      normalizedProfile?.cover ||
+      normalizedProfile?.Cover ||
+      normalizedProfile?.coverImage ||
+      normalizedProfile?.CoverImage ||
+      null,
+    [normalizedProfile]
+  );
+
+  const {
+    src: activeAvatarSource,
+    sources: avatarSources,
+    sourceIndex: avatarSourceIndex,
+    onError: handleAvatarImageError,
+  } = useArweaveMediaSources(avatarRaw);
+
+  const {
+    src: activeBannerSource,
+    sources: bannerSources,
+    sourceIndex: bannerSourceIndex,
+    onError: handleBannerImageError,
+  } = useArweaveMediaSources(bannerRaw);
+
+  useEffect(() => {
+    if (!profileDebug) return;
+    console.info('[profile] media candidates', {
+      avatarSources,
+      bannerSources,
+      avatarSourceIndex,
+      bannerSourceIndex,
+    });
+  }, [avatarSources, bannerSources, avatarSourceIndex, bannerSourceIndex, profileDebug]);
+
+  const handleAvatarImageErrorWithLog = useCallback(() => {
+    if (activeAvatarSource) {
+      console.warn('[profile] avatar image failed', {
+        url: activeAvatarSource,
+        next: avatarSources[avatarSourceIndex + 1] || null,
+      });
+    }
+    handleAvatarImageError();
+  }, [activeAvatarSource, avatarSourceIndex, avatarSources, handleAvatarImageError]);
+
+  const handleBannerImageErrorWithLog = useCallback(() => {
+    if (activeBannerSource) {
+      console.warn('[profile] banner image failed', {
+        url: activeBannerSource,
+        next: bannerSources[bannerSourceIndex + 1] || null,
+      });
+    }
+    handleBannerImageError();
+  }, [activeBannerSource, bannerSourceIndex, bannerSources, handleBannerImageError]);
+
+  const handleAvatarImageLoad = useCallback(() => {
+    if (activeAvatarSource) console.info('[profile] avatar image loaded', activeAvatarSource);
+  }, [activeAvatarSource]);
+
+  const handleBannerImageLoad = useCallback(() => {
+    if (activeBannerSource) console.info('[profile] banner image loaded', activeBannerSource);
+  }, [activeBannerSource]);
+
+  const profileAssets = useMemo(
+    () => (normalizedProfile ? collectProfileAssetRefs(normalizedProfile) : []),
+    [normalizedProfile]
+  );
 
   const profileName = useMemo(
     () => getProfileDisplayName(normalizedProfile) || 'Unnamed',
@@ -238,26 +469,27 @@ export function Profile() {
     () => getProfileBio(normalizedProfile),
     [normalizedProfile]
   );
+  const bioPreviewLimit = 140;
+  const bioNeedsExpand = Boolean(profileBio && profileBio.length > bioPreviewLimit);
+  const profileBioPreview = useMemo(() => {
+    if (!profileBio) return '';
+    if (bioExpanded || !bioNeedsExpand) return profileBio;
+    return `${profileBio.slice(0, bioPreviewLimit).trim()}…`;
+  }, [bioExpanded, bioNeedsExpand, profileBio]);
   const hasIdentity = useMemo(
     () =>
       Boolean(
-        avatarSource ||
-        bannerSource ||
+        activeAvatarSource ||
+        activeBannerSource ||
         profileHandle ||
         profileBio ||
         (profileName && profileName !== 'Unnamed')
       ),
-    [avatarSource, bannerSource, profileHandle, profileBio, profileName]
+    [activeAvatarSource, activeBannerSource, profileHandle, profileBio, profileName]
   );
   const walletProfileFallback = useMemo(
-    () =>
-      Boolean(
-        routeProfileRef &&
-        isLikelyArweaveAddressRef(routeProfileRef) &&
-        resolvedAddress &&
-        !normalizedProfile?.id
-      ),
-    [normalizedProfile?.id, resolvedAddress, routeProfileRef]
+    () => Boolean(isWalletRoute && isReady && !loading && !normalizedProfile?.id),
+    [isWalletRoute, isReady, loading, normalizedProfile?.id]
   );
 
   const audiusProof = useMemo(() => {
@@ -282,7 +514,7 @@ export function Profile() {
 
   const shareUrl = useMemo(() => {
     if (typeof window === 'undefined') return '';
-    const ref = routeProfileRef || normalizedProfile?.id || '';
+    const ref = normalizedProfile?.id || routeProfileRef || '';
     return `${window.location.origin}/#/profile/${ref}`;
   }, [routeProfileRef, normalizedProfile?.id]);
 
@@ -314,14 +546,50 @@ export function Profile() {
   }, [normalizedProfile?.audiusHandle, profile?.audiusHandle, isOwn, audiusUser?.handle]);
 
   useEffect(() => {
+    const onProfileUpdated = (event: Event) => {
+      const custom = event as CustomEvent<{ address?: string; profile?: any }>;
+      const nextProfile = custom.detail?.profile;
+      if (!nextProfile?.id) return;
+      const route = String(routeProfileRef || '').toLowerCase();
+      const profileId = String(nextProfile.id).toLowerCase();
+      const owner = String(
+        nextProfile.walletAddress ||
+        nextProfile.owner ||
+        nextProfile.WalletAddress ||
+        nextProfile.Owner ||
+        custom.detail?.address ||
+        ''
+      ).toLowerCase();
+      if (route && (route === profileId || route === owner)) {
+        setProfile(nextProfile);
+        PROFILE_CACHE.set(routeProfileRef!, nextProfile);
+        PROFILE_CACHE.set(String(nextProfile.id), nextProfile);
+      }
+    };
+    window.addEventListener('streamvault:profile-updated', onProfileUpdated as EventListener);
+    return () => window.removeEventListener('streamvault:profile-updated', onProfileUpdated as EventListener);
+  }, [routeProfileRef]);
+
+  useEffect(() => {
     let cancelled = false;
     (async () => {
       if (!routeProfileRef) {
         profileLog('[profile] skip fetch: missing route :address', { isReady, hasLibs: Boolean(libs) });
         return;
       }
+      if (profileSaveInFlightRef.current) {
+        profileLog('[profile] skip fetch: profile save in flight');
+        return;
+      }
       if (!isReady) {
         profileLog('[profile] skip fetch: permaweb not ready yet', { routeProfileRef });
+        if (
+          connectedAddress &&
+          routeProfileRef &&
+          routeProfileRef.toLowerCase() === connectedAddress.toLowerCase()
+        ) {
+          setLoading(true);
+        }
         return;
       }
       if (!libs) {
@@ -329,9 +597,32 @@ export function Profile() {
         return;
       }
       const cached = PROFILE_CACHE.get(routeProfileRef);
-      if (cached) {
+      if (cached?.id) {
         setProfile(cached);
         setLoading(false);
+      } else if (typeof window !== 'undefined') {
+        const snapshotWallet = connectedAddress || null;
+        let hydrated = false;
+        if (snapshotWallet) {
+          try {
+            const snapshotRaw = localStorage.getItem(getProfileSnapshotKey(snapshotWallet));
+            if (snapshotRaw) {
+              const snapshot = JSON.parse(snapshotRaw);
+              if (snapshot?.id && profileOwnedByWallet(snapshot, snapshotWallet)) {
+                setProfile(snapshot);
+                PROFILE_CACHE.set(routeProfileRef, snapshot);
+                PROFILE_CACHE.set(String(snapshot.id), snapshot);
+                hydrated = true;
+                setLoading(false);
+              }
+            }
+          } catch {
+            // ignore snapshot parse errors
+          }
+        }
+        if (!hydrated) {
+          setLoading(true);
+        }
       } else {
         setLoading(true);
       }
@@ -342,42 +633,74 @@ export function Profile() {
           resolvedAddress: resolvedAddress?.slice(0, 12),
           connected: connectedAddress?.slice(0, 12),
         });
-        const overrideId =
-          resolvedAddress ? getStoredProfileOverrideId(resolvedAddress) : '';
+        const overrideId = connectedAddress ? getStoredProfileOverrideId(connectedAddress) : '';
         if (overrideId) {
           setProfileOverrideId(overrideId);
           setProfileOverrideInput(overrideId);
         }
-        let p = overrideId ? await getProfileByIdSafe(libs, overrideId) : null;
-        if (!p?.id && isLikelyArweaveAddressRef(routeProfileRef)) {
-          // Prefer owner-based resolution first so wallet-routed profiles do not depend on direct process hydration.
-          p = await getSelectedOrLatestProfileByWallet(libs, routeProfileRef, { useOverride: true });
+        const connected = connectedAddress;
+        const isWalletAsRoute =
+          Boolean(routeProfileRef && connected) &&
+          isLikelyArweaveAddressRef(routeProfileRef) &&
+          routeProfileRef.toLowerCase() === connected!.toLowerCase();
+        const knownZoneId =
+          overrideId ||
+          (cachedOwnProfileId && cachedOwnProfileId !== routeProfileRef ? cachedOwnProfileId : '');
+        let p: PermaProfile | null = null;
+        if (isWalletAsRoute && connectedAddress) {
+          p = await getSelectedOrLatestProfileByWallet(libs, connectedAddress, {
+            useOverride: true,
+            timeoutMs: 15_000,
+          });
         }
-        if (!p?.id) {
-          const byId = await getProfileByIdSafe(libs, routeProfileRef);
-          if (byId?.id) p = byId;
+        if (!p?.id && knownZoneId) {
+          p = await getProfileByIdSafe(libs, knownZoneId, { timeoutMs: 15_000 });
+        }
+        if (!p?.id && routeProfileRef && !isWalletAsRoute) {
+          p = await getProfileByIdSafe(libs, routeProfileRef, { timeoutMs: 15_000 });
         }
         profileLog('[profile] data', p);
         profileLog('[profile] fetch result', { hasProfile: Boolean(p?.id) });
         if (!cancelled) {
-          const next = p?.id ? p : profileRef.current?.id ? profileRef.current : { id: null };
+          const fetched = p?.id ? p : null;
+          const prev = profileRef.current;
+          const route = routeProfileRef.toLowerCase();
+          const connected = connectedAddress?.toLowerCase();
+          const prevOwner = inferProfileWalletAddress(prev, null)?.toLowerCase();
+          const keepPrev =
+            Boolean(prev?.id) &&
+            ((prev?.id && String(prev.id).toLowerCase() === route) ||
+              (connected &&
+                prevOwner === connected &&
+                prev &&
+                profileOwnedByWallet(prev, connectedAddress)));
+          let next: PermaProfile | { id: null } = fetched?.id
+            ? fetched
+            : keepPrev && prev
+              ? prev
+              : { id: null };
           setProfile(next);
           if (next?.id) {
             PROFILE_CACHE.set(routeProfileRef, next);
             PROFILE_CACHE.set(String(next.id), next);
           }
+          const canonicalPath = shouldCanonicalizeProfileRoute(routeProfileRef, next);
+          if (canonicalPath) {
+            navigate(canonicalPath, { replace: true });
+          }
           const walletForSnapshot = inferProfileWalletAddress(next, resolvedAddress);
-          if (walletForSnapshot && typeof window !== 'undefined') {
+          if (walletForSnapshot && next?.id && typeof window !== 'undefined') {
             try {
               localStorage.setItem(getProfileSnapshotKey(walletForSnapshot), JSON.stringify(next));
+              if (connectedAddress && profileOwnedByWallet(next, connectedAddress)) {
+                localStorage.setItem(
+                  `streamvault:lastProfileId:${connectedAddress.toLowerCase()}`,
+                  String(next.id)
+                );
+              }
             } catch {
               // ignore storage failures
             }
-            window.dispatchEvent(
-              new CustomEvent('streamvault:profile-updated', {
-                detail: { address: walletForSnapshot, profile: next },
-              })
-            );
           }
         }
       } catch (e: any) {
@@ -390,7 +713,50 @@ export function Profile() {
     return () => {
       cancelled = true;
     };
-  }, [isReady, libs, routeProfileRef, connectedAddress, resolvedAddress, walletType]);
+  }, [isReady, libs, routeProfileRef, connectedAddress, cachedOwnProfileId, walletType, navigate]);
+
+  useEffect(() => {
+    if (!isReady || !libs || !connectedAddress || !isWalletRoute || normalizedProfile?.id || loading) {
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void getSelectedOrLatestProfileByWallet(libs, connectedAddress, {
+        useOverride: true,
+        timeoutMs: 15_000,
+      }).then((resolved) => {
+        if (cancelled || !resolved?.id) return;
+        setProfile(resolved);
+        PROFILE_CACHE.set(routeProfileRef!, resolved);
+        PROFILE_CACHE.set(String(resolved.id), resolved);
+        localStorage.setItem(
+          `streamvault:lastProfileId:${connectedAddress.toLowerCase()}`,
+          String(resolved.id)
+        );
+        const canonicalPath = shouldCanonicalizeProfileRoute(routeProfileRef, resolved);
+        if (canonicalPath) navigate(canonicalPath, { replace: true });
+      });
+    }, 1200);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [
+    connectedAddress,
+    isReady,
+    isWalletRoute,
+    libs,
+    loading,
+    navigate,
+    normalizedProfile?.id,
+    routeProfileRef,
+  ]);
+
+  useEffect(() => {
+    if (!normalizedProfile?.id || !routeProfileRef) return;
+    const canonicalPath = shouldCanonicalizeProfileRoute(routeProfileRef, normalizedProfile);
+    if (canonicalPath) navigate(canonicalPath, { replace: true });
+  }, [navigate, normalizedProfile, routeProfileRef]);
 
   useEffect(() => {
     let cancelled = false;
@@ -445,9 +811,9 @@ export function Profile() {
     }
     tokenResolveTimerRef.current = window.setTimeout(() => {
       (async () => {
-        const assets = normalizedProfile?.assets;
+        const assets = profileAssets;
         const profileId = normalizedProfile?.id ? String(normalizedProfile.id) : '';
-        if (!libs || !Array.isArray(assets) || assets.length === 0) {
+        if (!libs || assets.length === 0) {
           setProfileTokens([]);
           return;
         }
@@ -458,7 +824,7 @@ export function Profile() {
           return;
         }
         try {
-          const resolved = await resolveProfileTokens(libs, assets);
+          const resolved = await resolveProfileTokens(libs, assets, getProfileReadLibs(libs));
           if (!cancelled) {
             setProfileTokens(resolved);
             PROFILE_TOKENS_CACHE.set(tokenCacheKey, resolved);
@@ -475,7 +841,7 @@ export function Profile() {
         tokenResolveTimerRef.current = null;
       }
     };
-  }, [libs, normalizedProfile?.assets]);
+  }, [libs, profileAssets, normalizedProfile?.id]);
 
   useEffect(() => {
     let cancelled = false;
@@ -551,14 +917,15 @@ export function Profile() {
       setLocalSamples([]);
       return;
     }
-    if (!resolvedAddress) {
+    const wallet = uploadWalletAddress;
+    if (!wallet) {
       setLocalSamples([]);
       return;
     }
     try {
       const addrs = new Set<string>();
-      addrs.add(resolvedAddress.toLowerCase());
-      if (connectedAddress && connectedAddress.toLowerCase() !== resolvedAddress.toLowerCase()) {
+      addrs.add(wallet.toLowerCase());
+      if (connectedAddress && connectedAddress.toLowerCase() !== wallet.toLowerCase()) {
         addrs.add(connectedAddress.toLowerCase());
       }
       const byTx = new Map<string, LocalSample>();
@@ -571,7 +938,7 @@ export function Profile() {
           }
         }
       }
-      const ledger = readUploadLedger([resolvedAddress, connectedAddress]);
+      const ledger = readUploadLedger([wallet, connectedAddress]);
       for (const e of ledger) {
         const normalized = normalizeUploadedTrackRecord(e);
         if (!normalized?.txId) continue;
@@ -586,32 +953,73 @@ export function Profile() {
     } catch {
       setLocalSamples([]);
     }
-  }, [resolvedAddress, connectedAddress]);
+  }, [uploadWalletAddress, connectedAddress]);
 
   useEffect(() => {
     reloadDeviceUploads();
   }, [reloadDeviceUploads]);
 
   useEffect(() => {
-    const onUpdate = () => reloadDeviceUploads();
+    let cancelled = false;
+    if (!uploadWalletAddress) {
+      setChainProfileUploads([]);
+      setChainAtomicAssets([]);
+      return;
+    }
+    void Promise.all([
+      queryPermanentUploadsByOwner(uploadWalletAddress, 50),
+      queryAtomicAssetsByCreator(uploadWalletAddress, 50),
+    ])
+      .then(([uploads, assets]) => {
+        if (!cancelled) {
+          setChainProfileUploads(uploads);
+          setChainAtomicAssets(assets);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setChainProfileUploads([]);
+          setChainAtomicAssets([]);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [uploadWalletAddress]);
+
+  useEffect(() => {
+    const onUpdate = () => {
+      reloadDeviceUploads();
+      if (!uploadWalletAddress) return;
+      void Promise.all([
+        queryPermanentUploadsByOwner(uploadWalletAddress, 50),
+        queryAtomicAssetsByCreator(uploadWalletAddress, 50),
+      ]).then(([uploads, assets]) => {
+        setChainProfileUploads(uploads);
+        setChainAtomicAssets(assets);
+      }).catch(() => {
+        setChainProfileUploads([]);
+        setChainAtomicAssets([]);
+      });
+    };
     window.addEventListener('streamvault:profile-updated', onUpdate);
     window.addEventListener('streamvault:uploads-updated', onUpdate);
     return () => {
       window.removeEventListener('streamvault:profile-updated', onUpdate);
       window.removeEventListener('streamvault:uploads-updated', onUpdate);
     };
-  }, [reloadDeviceUploads]);
+  }, [reloadDeviceUploads, uploadWalletAddress]);
 
   useEffect(() => {
     let cancelled = false;
-    if (!resolvedAddress || !isOwn) {
+    if (!uploadWalletAddress || !isOwn) {
       setAoPublishedTracks([]);
       return;
     }
     (async () => {
       try {
-        const addrs = [resolvedAddress];
-        if (connectedAddress && connectedAddress.toLowerCase() !== resolvedAddress.toLowerCase()) {
+        const addrs = [uploadWalletAddress];
+        if (connectedAddress && connectedAddress.toLowerCase() !== uploadWalletAddress.toLowerCase()) {
           addrs.push(connectedAddress);
         }
         const map = new Map<string, RegisteredTrackRecord>();
@@ -630,7 +1038,7 @@ export function Profile() {
     return () => {
       cancelled = true;
     };
-  }, [resolvedAddress, connectedAddress, isOwn]);
+  }, [uploadWalletAddress, connectedAddress, isOwn]);
 
   /** On-chain list from profile zone (ArweaveTracks preferred; Samples kept for older profiles). */
   const profileArweaveTracks = useMemo(() => {
@@ -668,6 +1076,31 @@ export function Profile() {
       const prev = byTx.get(row.txId);
       byTx.set(row.txId, { ...prev, ...row });
     }
+    for (const row of chainProfileUploads) {
+      const prev = byTx.get(row.txId);
+      byTx.set(row.txId, {
+        ...prev,
+        ...row,
+        assetId: row.assetId || prev?.assetId,
+        walletAddress: row.walletAddress || prev?.walletAddress || uploadWalletAddress || undefined,
+      });
+    }
+    for (const asset of chainAtomicAssets) {
+      if (asset.audioTxId) {
+        const prev = byTx.get(asset.audioTxId);
+        byTx.set(asset.audioTxId, {
+          ...prev,
+          txId: asset.audioTxId,
+          title: prev?.title || asset.title,
+          artist: prev?.artist || asset.artist,
+          assetId: asset.assetId,
+          artworkTxId: prev?.artworkTxId || asset.artworkTxId,
+          walletAddress: prev?.walletAddress || asset.walletAddress || uploadWalletAddress || undefined,
+          createdAt: prev?.createdAt || asset.createdAt || new Date(0).toISOString(),
+          permawebUrl: prev?.permawebUrl || arweaveTxDataUrl(asset.audioTxId),
+        });
+      }
+    }
     for (const row of aoPublishedTracks) {
       const prev = byTx.get(row.audioTxId);
       byTx.set(row.audioTxId, {
@@ -696,7 +1129,7 @@ export function Profile() {
     return Array.from(byTx.values()).sort(
       (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
     );
-  }, [aoPublishedTracks, localSamples, profileArweaveTracks]);
+  }, [aoPublishedTracks, chainAtomicAssets, chainProfileUploads, localSamples, profileArweaveTracks, uploadWalletAddress]);
 
   const useUnifiedMusicGrid = visibleAudiusTracks.length > 0;
 
@@ -711,6 +1144,18 @@ export function Profile() {
     }
     return mergedProfileUploads.filter((upload) => !matchedTxIds.has(upload.txId));
   }, [mergedProfileUploads, useUnifiedMusicGrid, visibleAudiusTracks]);
+
+  const visibleProfileUploads = useMemo(
+    () => (useUnifiedMusicGrid ? arweaveOnlyProfileUploads : mergedProfileUploads),
+    [arweaveOnlyProfileUploads, mergedProfileUploads, useUnifiedMusicGrid]
+  );
+
+  const displayAtomicAssets = useMemo(() => {
+    const inTrackGrid = new Set(
+      mergedProfileUploads.map((upload) => String(upload.assetId || '').trim()).filter(Boolean)
+    );
+    return atomicAssets.filter((asset) => asset.id && !inTrackGrid.has(asset.id));
+  }, [atomicAssets, mergedProfileUploads]);
 
   const handleAddSample = async () => {
     if (!libs?.addToZone || !normalizedProfile?.id || walletType !== 'arweave') return;
@@ -765,7 +1210,7 @@ export function Profile() {
   };
 
   const handleVerifyAudius = async () => {
-    if (!normalizedProfile?.audiusHandle || !normalizedProfile?.id || !libs?.updateZone) return;
+    if (!normalizedProfile?.audiusHandle || !normalizedProfile?.id) return;
     if (!connectedAddress || !walletType) return;
     setVerifying(true);
     setVerifyError(null);
@@ -796,13 +1241,20 @@ export function Profile() {
         signature,
         createdAt: new Date().toISOString(),
       };
-      await libs.updateZone(
-        {
-          AudiusHandle: normalizedProfile.audiusHandle,
-          AudiusProof: JSON.stringify(proof),
-        },
-        normalizedProfile.id
-      );
+      const signerWallet = resolveArweaveSigner(arweaveApi);
+      if (walletType === 'arweave') {
+        await connectArweaveSignerForProfile(signerWallet);
+        const writableLibs = await getWritableProfileLibs(getWritableLibs);
+        await applyProfileZoneExtras(
+          writableLibs,
+          normalizedProfile.id,
+          {
+            audiusHandle: String(normalizedProfile.audiusHandle),
+            audiusProof: JSON.stringify(proof),
+          },
+          normalizedProfile
+        );
+      }
     } catch (e: any) {
       setVerifyError(e?.message || 'Verification failed');
     } finally {
@@ -881,27 +1333,14 @@ export function Profile() {
     setLinkAudiusSuccess(null);
     setLinkAudiusDebug(null);
     try {
-      const injectedWallet = typeof window !== 'undefined' ? (window as any).arweaveWallet : null;
-      const signerWallet = injectedWallet || arweaveApi || null;
+      const signerWallet = resolveArweaveSigner(arweaveApi);
       if (!signerWallet) throw new Error('Arweave signer unavailable.');
 
       const permissionsBefore = await signerWallet.getPermissions?.().catch(() => null);
-      if (signerWallet?.connect) {
-        await signerWallet.connect([
-          'ACCESS_ADDRESS',
-          'ACCESS_PUBLIC_KEY',
-          'SIGN_TRANSACTION',
-          'SIGNATURE',
-          'DISPATCH',
-        ]);
-      }
+      await connectArweaveSignerForProfile(signerWallet);
       const permissionsAfter = await signerWallet.getPermissions?.().catch(() => null);
 
       const signerAddress = await signerWallet.getActiveAddress?.().catch(() => null);
-      const writableLibs = await getWritableLibs();
-      if (!writableLibs?.updateZone) {
-        throw new Error('Writable permaweb client unavailable. Reconnect Wander and retry.');
-      }
       const profileRecord =
         normalizedProfile?.id
           ? { id: normalizedProfile.id }
@@ -909,37 +1348,42 @@ export function Profile() {
       if (!profileRecord?.id) {
         throw new Error('Create an Arweave profile first, then link your Audius identity.');
       }
-      const resolvedHandle =
-        String(profileHandle || normalizedProfile?.username || '').trim() ||
-        String(connectedAddress || '').slice(0, 12);
-      const resolvedName =
-        String(
-          (profileName !== 'Unnamed' ? profileName : '') ||
-          normalizedProfile?.displayName ||
-          normalizedProfile?.name ||
-          resolvedHandle
-        ).trim();
-      const resolvedBio = String(profileBio || normalizedProfile?.description || '').trim();
-      const zonePayload = {
-        Name: resolvedName,
-        Handle: resolvedHandle,
-        Bio: resolvedBio,
-        AudiusHandle: String(audiusUser.handle || '').trim(),
-      };
-      await writableLibs.updateZone(zonePayload, profileRecord.id);
+      const profileScheduler = await resolveProfileScheduler(normalizedProfile || profileRecord);
+      const writeNodeUrls = resolveProfileZoneWriteNodeUrls();
+      const writeUrl = writeNodeUrls[0];
+      profileLog('[profile] zone extras scheduler', {
+        profileId: profileRecord.id,
+        scheduler: profileScheduler || 'default',
+        writeUrl: writeUrl || 'default',
+      });
+      const writableLibs = await getWritableProfileLibs(
+        getWritableLibs,
+        {
+          ...(profileScheduler ? { scheduler: profileScheduler } : {}),
+          ...(writeUrl ? { url: writeUrl } : {}),
+        }
+      );
+      await applyProfileZoneExtras(
+        writableLibs,
+        profileRecord.id,
+        {
+          audiusHandle: String(audiusUser.handle || '').trim(),
+        },
+        profileRecord
+      );
 
       setProfile((prev) => (prev ? { ...prev, audiusHandle: audiusUser.handle } : prev));
       window.dispatchEvent(new CustomEvent('streamvault:profile-updated'));
       setLinkAudiusDebug({
         status: 'success',
-        usedPath: 'fresh-writable-updateZone',
-        signerSource: injectedWallet ? 'injected' : 'wallet-kit-api',
+        usedPath: 'permaweb-libs-zone-extras',
+        signerSource: (typeof window !== 'undefined' && (window as any).arweaveWallet) ? 'injected' : 'wallet-kit-api',
         signerAddress,
         permissionsBefore,
         permissionsAfter,
         connectedAddress,
         profileId: profileRecord.id,
-        payload: zonePayload,
+        audiusHandle: audiusUser.handle,
       });
       setLinkAudiusSuccess('Audius identity linked to profile.');
     } catch (e: any) {
@@ -971,7 +1415,7 @@ export function Profile() {
     removeThumbnail?: boolean;
     removeBanner?: boolean;
   }) => {
-    if (!libs?.createProfile || !connectedAddress) return;
+    if (!libs || !connectedAddress || walletType !== 'arweave') return;
     setCreating(true);
     setError(null);
     try {
@@ -983,37 +1427,53 @@ export function Profile() {
         setCreateOpen(false);
         return;
       }
-      const args: any = {
-        username: form.username.trim(),
-        displayName: form.displayName.trim(),
-        description: form.description.trim(),
-      };
-      if (form.thumbnail) args.thumbnail = await fileToDataURL(form.thumbnail);
-      if (form.banner) args.banner = await fileToDataURL(form.banner);
 
-      const profileId = await libs.createProfile(args);
+      const signerWallet = resolveArweaveSigner(arweaveApi);
+      if (!signerWallet) throw new Error('Arweave signer unavailable. Connect Wander and retry.');
+      await connectArweaveSignerForProfile(signerWallet);
+      const writeNodeUrls = resolveProfileZoneWriteNodeUrls();
+      const writeUrl = writeNodeUrls[0];
+      profileLog('[profile] create write nodes', { writeUrl, writeNodeUrls });
+      const writableLibs = await getWritableProfileLibs(getWritableLibs, writeUrl ? { url: writeUrl } : undefined);
+      const args = await buildPermawebProfileArgs(form, fileToDataURL, writableLibs);
+
+      const profileId = await createPermawebProfile({
+        writableLibs,
+        profileArgs: args,
+        getWritableLibs,
+        writeOptions: {
+          ...(writeUrl ? { url: writeUrl } : {}),
+          writeNodeUrls,
+        },
+        onStatus: (status: unknown) => {
+          profileLog('[profile] create status', status);
+        },
+      });
       profileLog('[profile] create success', { profileId });
-      if (profileId && libs.updateZone) {
-        const update: Record<string, string> = {
-          Name: form.displayName.trim(),
-          Handle: form.username.trim(),
-          Bio: form.description.trim(),
-        };
-        if (form.audiusHandle) update.AudiusHandle = form.audiusHandle;
-        await libs.updateZone(update, profileId);
-        profileLog('[profile] profile updated', { profileId });
+      if (!profileId) throw new Error('permaweb-libs createProfile returned no profile id.');
+
+      if (form.audiusHandle?.trim()) {
+        await applyProfileZoneExtras(writableLibs, profileId, {
+          audiusHandle: form.audiusHandle.trim(),
+        });
       }
-      setProfile({ id: profileId, walletAddress: connectedAddress, username: args.username, displayName: args.displayName, description: args.description });
+
+      const next = {
+        id: profileId,
+        walletAddress: connectedAddress,
+        username: args.username,
+        displayName: args.displayName,
+        description: args.description,
+        ...(form.audiusHandle?.trim() ? { audiusHandle: form.audiusHandle.trim() } : {}),
+      };
+      setProfile(next);
       if (typeof window !== 'undefined') {
-        const next = {
-          id: profileId,
-          walletAddress: connectedAddress,
-          username: args.username,
-          displayName: args.displayName,
-          description: args.description,
-        };
         try {
           localStorage.setItem(getProfileSnapshotKey(connectedAddress), JSON.stringify(next));
+          localStorage.setItem(
+            `streamvault:lastProfileId:${connectedAddress.toLowerCase()}`,
+            String(profileId)
+          );
         } catch {
           // ignore storage failures
         }
@@ -1025,11 +1485,11 @@ export function Profile() {
       }
       setCreateOpen(false);
 
-      if (profileId && localSamples.length > 0 && libs.addToZone) {
+      if (localSamples.length > 0 && writableLibs.addToZone) {
         setSyncing(true);
         try {
           for (const sample of localSamples) {
-            await libs.addToZone(
+            await writableLibs.addToZone(
               {
                 path: 'ArweaveTracks[]',
                 data: sample,
@@ -1045,21 +1505,20 @@ export function Profile() {
         }
       }
 
-      // Best-effort refresh (indexing may lag)
       try {
-        const fresh = await getSelectedOrLatestProfileByWallet(libs, connectedAddress);
+        const fresh = await refreshProfileAfterWrite({
+          readLibs: libs,
+          profileId: String(profileId),
+          connectedAddress,
+          optimistic: next,
+        });
         if (fresh) setProfile(fresh);
       } catch {
-        // ignore - eventual consistency
+        // keep optimistic profile
       }
     } catch (e: any) {
       console.error('[profile] create failed', e);
-      const msg = String(e?.message || '');
-      if (msg.includes('not allowed on this SU') || msg.includes('Process') && msg.includes('not allowed')) {
-        setError('Permaweb profile creation is not available on this node right now. Try again later or use an AO mainnet-enabled environment.');
-      } else {
-        setError(msg || 'Profile creation failed');
-      }
+      setError(e?.message || 'Profile creation failed');
     } finally {
       setCreating(false);
     }
@@ -1077,91 +1536,233 @@ export function Profile() {
     removeThumbnail?: boolean;
     removeBanner?: boolean;
   }) => {
-    if (!libs?.updateProfile || !normalizedProfile?.id || walletType !== 'arweave') return;
+    if (!normalizedProfile?.id || walletType !== 'arweave' || !connectedAddress) return;
     setCreating(true);
     setError(null);
-    try {
-      const args: any = {
-        username: form.username.trim(),
-        displayName: form.displayName.trim(),
-        description: form.description.trim(),
-      };
-      if (form.thumbnail) {
-        args.thumbnail = await fileToDataURL(form.thumbnail);
-      } else if (!form.removeThumbnail && form.thumbnailValue) {
-        args.thumbnail = form.thumbnailValue;
-      }
-      if (form.banner) {
-        args.banner = await fileToDataURL(form.banner);
-      } else if (!form.removeBanner && form.bannerValue) {
-        args.banner = form.bannerValue;
-      }
+    profileSaveInFlightRef.current = true;
 
-      await libs.updateProfile(args, normalizedProfile.id);
-      if (libs.updateZone) {
-        await libs.updateZone(
-          {
-            Name: form.displayName.trim(),
-            Handle: form.username.trim(),
-            Bio: form.description.trim(),
-            AudiusHandle: form.audiusHandle?.trim() || '',
-          },
-          normalizedProfile.id
-        );
-      }
-      const fresh =
-        (await libs.getProfileById?.(normalizedProfile.id)) ||
-        (resolvedAddress ? await getSelectedOrLatestProfileByWallet(libs, resolvedAddress) : null);
-      if (fresh) setProfile(fresh);
-      if (fresh && connectedAddress && typeof window !== 'undefined') {
+    const profileId = String(normalizedProfile.id);
+
+    const persistConfirmedProfile = (onChain: any) => {
+      setProfile(onChain);
+      PROFILE_CACHE.set(profileId, onChain);
+      if (routeProfileRef) PROFILE_CACHE.set(routeProfileRef, onChain);
+      if (typeof window !== 'undefined') {
         try {
-          localStorage.setItem(getProfileSnapshotKey(connectedAddress), JSON.stringify(fresh));
+          localStorage.setItem(getProfileSnapshotKey(connectedAddress), JSON.stringify(onChain));
+          localStorage.setItem(
+            `streamvault:lastProfileId:${connectedAddress.toLowerCase()}`,
+            profileId
+          );
         } catch {
           // ignore storage failures
         }
         window.dispatchEvent(
           new CustomEvent('streamvault:profile-updated', {
-            detail: { address: connectedAddress, profile: fresh },
+            detail: { address: connectedAddress, profile: onChain },
           })
         );
       }
       setEditOpen(false);
+      setError(null);
+    };
+
+    try {
+      // #region agent log
+      const _dbgFetch = globalThis.fetch.bind(globalThis);
+      _dbgFetch('http://127.0.0.1:7875/ingest/e73f4289-b39c-483d-adc2-eb8e696a88dd', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '935ac8' },
+        body: JSON.stringify({
+          sessionId: '935ac8',
+          runId: 'pre-fix',
+          hypothesisId: 'H0',
+          location: 'Profile.tsx:handleEditProfile',
+          message: 'edit save start',
+          data: { profileId, walletType, hasConnectedAddress: Boolean(connectedAddress) },
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {});
+      // #endregion
+      const signerWallet = resolveArweaveSigner(arweaveApi);
+      await connectArweaveSignerForProfile(signerWallet);
+
+      const profileScheduler = await resolveProfileScheduler(normalizedProfile);
+      const writeNodeUrls = resolveProfileZoneWriteNodeUrls();
+      const writeUrl = writeNodeUrls[0];
+      profileLog('[profile] edit scheduler', {
+        profileId,
+        scheduler: profileScheduler || 'default',
+        writeUrl: writeUrl || 'default',
+        writeNodeUrls,
+      });
+      const writableLibs = await getWritableProfileLibs(
+        getWritableLibs,
+        {
+          ...(profileScheduler ? { scheduler: profileScheduler } : {}),
+          ...(writeUrl ? { url: writeUrl } : {}),
+        }
+      );
+      const writeOptions = {
+        ...(profileScheduler ? { scheduler: profileScheduler } : {}),
+        ...(writeUrl ? { url: writeUrl } : {}),
+        writeNodeUrls,
+      };
+      const args = await buildPermawebProfileArgsWithTimeout(form, fileToDataURL, writableLibs, normalizedProfile);
+
+      profileLog('[profile] edit updateZone', {
+        profileId,
+        args,
+        thumbnailRef: args.thumbnail?.slice(0, 12),
+        bannerRef: args.banner?.slice(0, 12),
+      });
+
+      const onChain = await writeAndConfirmProfileUpdate({
+        writableLibs,
+        readLibs: libs,
+        profileArgs: args,
+        profileId,
+        form,
+        getWritableLibs,
+        writeOptions,
+        onStatus: (status) => profileLog('[profile] update status', status),
+      });
+
+      if (form.audiusHandle?.trim()) {
+        await applyProfileZoneExtras(
+          writableLibs,
+          profileId,
+          { audiusHandle: form.audiusHandle.trim() },
+          normalizedProfile
+        );
+      }
+
+      persistConfirmedProfile(onChain);
     } catch (e: any) {
-      setError(e?.message || 'Profile update failed');
+      // #region agent log
+      const _dbgFetch = globalThis.fetch.bind(globalThis);
+      _dbgFetch('http://127.0.0.1:7875/ingest/e73f4289-b39c-483d-adc2-eb8e696a88dd', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '935ac8' },
+        body: JSON.stringify({
+          sessionId: '935ac8',
+          runId: 'pre-fix',
+          hypothesisId: 'H0',
+          location: 'Profile.tsx:handleEditProfile',
+          message: 'edit save failed',
+          data: { profileId, error: String(e?.message || e) },
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {});
+      // #endregion
+      console.error('[profile] edit failed', e);
+      setError(e?.message || 'Profile update failed. Your on-chain profile was not changed.');
     } finally {
+      profileSaveInFlightRef.current = false;
       setCreating(false);
     }
   };
 
   return (
     <div className={styles.page}>
-      {bannerSource && (
-        <div className={styles.bannerWrap}>
-          <img className={styles.bannerImg} src={bannerSource} alt="" />
-        </div>
-      )}
-      <header className={styles.header + ' glass'}>
-        {avatarSource ? (
-          <img className={styles.avatarImg} src={avatarSource} alt="" />
-        ) : (
-          <div className={styles.avatarPlaceholder} />
+      <section className={styles.profileHero + ' glass'}>
+        {activeBannerSource && (
+          <img
+            className={styles.profileHeroBanner}
+            src={activeBannerSource}
+            alt=""
+            onError={handleBannerImageErrorWithLog}
+            onLoad={handleBannerImageLoad}
+          />
         )}
-        <div>
-          <h1 className={styles.title}>
-            {hasIdentity ? profileName : isOwn ? 'Your profile' : 'Creator profile'}
-          </h1>
-          {profileHandle && <p className={styles.subtext}>@{profileHandle}</p>}
-          {profileBio && <p className={styles.subtext}>{profileBio}</p>}
-          <p className={styles.address}>{resolvedAddress?.slice(0, 8)}…{resolvedAddress?.slice(-8)}</p>
-          {walletType && <span className={styles.walletType}>{walletType}</span>}
+        <div className={styles.profileHeroOverlay} aria-hidden />
+        <div className={styles.profileHeroTopActions}>
+          <button
+            type="button"
+            className={styles.profileHeroShareBtn}
+            onClick={handleCopyShareUrl}
+            title="Copy profile link"
+          >
+            <ShareIcon />
+            {copiedShareUrl ? 'Copied' : 'Share'}
+          </button>
+          {walletType === 'arweave' && isOwn && (
+            <button
+              type="button"
+              className={styles.profileHeroEditBtn}
+              onClick={() => (normalizedProfile?.id ? setEditOpen(true) : setCreateOpen(true))}
+            >
+              {normalizedProfile?.id ? 'Edit profile' : 'Create profile'}
+            </button>
+          )}
         </div>
-      </header>
+        <div className={styles.profileHeroContent}>
+          {activeAvatarSource ? (
+            <img
+              className={styles.profileHeroAvatar}
+              src={activeAvatarSource}
+              alt=""
+              onError={handleAvatarImageErrorWithLog}
+              onLoad={handleAvatarImageLoad}
+            />
+          ) : (
+            <div className={styles.profileHeroAvatarPlaceholder} aria-hidden />
+          )}
+          <div className={styles.profileHeroText}>
+            <h1 className={styles.profileHeroTitle}>
+              {hasIdentity ? profileName : isOwn ? 'Your profile' : 'Creator profile'}
+            </h1>
+            {profileHandle && <p className={styles.profileHeroHandle}>@{profileHandle}</p>}
+            <div className={styles.profileHeroIdRow}>
+              <p className={styles.profileHeroMeta}>
+                {normalizedProfile?.id
+                  ? `${String(normalizedProfile.id).slice(0, 8)}…${String(normalizedProfile.id).slice(-8)}`
+                  : resolvedAddress
+                    ? `${String(resolvedAddress).slice(0, 8)}…${String(resolvedAddress).slice(-8)}`
+                    : 'Resolving…'}
+              </p>
+              {normalizedProfile?.id && (
+                <button
+                  type="button"
+                  className={styles.profileHeroCopyBtn}
+                  onClick={handleCopyProfileId}
+                  title="Copy profile ID"
+                  aria-label={copiedProfileId ? 'Copied profile ID' : 'Copy profile ID'}
+                >
+                  <CopyIcon />
+                </button>
+              )}
+            </div>
+            {profileBio ? (
+              <p className={styles.profileHeroBio}>
+                {profileBioPreview}
+                {bioNeedsExpand && (
+                  <button
+                    type="button"
+                    className={styles.profileHeroBioExpand}
+                    onClick={() => setBioExpanded((v) => !v)}
+                  >
+                    {bioExpanded ? ' less' : '…more'}
+                  </button>
+                )}
+              </p>
+            ) : (
+              <p className={styles.profileHeroBioMuted}>No description yet.</p>
+            )}
+          </div>
+        </div>
+      </section>
       {walletProfileFallback && (
         <section className={styles.fallbackNotice}>
           <p className={styles.fallbackTitle}>Wallet profile fallback active</p>
           <p className={styles.subtext}>
             StreamVault is showing the wallet-based profile view while the permanent permaweb profile data is unavailable or still resolving.
           </p>
+        </section>
+      )}
+      {loading && walletType === 'arweave' && !normalizedProfile?.id && (
+        <section className={styles.section + ' ' + styles.sectionTight}>
+          <LogoSpinner />
         </section>
       )}
       {(audiusProfile || (isOwn && audiusUser)) && (
@@ -1337,109 +1938,11 @@ export function Profile() {
           {audiusAuthError && <p className={styles.error}>{audiusAuthError}</p>}
         </section>
       )}
-      <section className={styles.section}>
-        <p className={styles.text}>
-          Share your profile: <strong>{shareUrl}</strong>
-        </p>
-        <div className={styles.sampleLinks} style={{ marginTop: '8px' }}>
-          <button type="button" className={styles.copyBtn} onClick={handleCopyShareUrl}>
-            {copiedShareUrl ? 'Copied share URL' : 'Copy share URL'}
-          </button>
-          {normalizedProfile?.id && (
-            <button type="button" className={styles.copyBtn} onClick={handleCopyProfileId}>
-              {copiedProfileId ? 'Copied profile ID' : 'Copy profile ID'}
-            </button>
-          )}
-        </div>
-        <p className={styles.subtext}>
-          Permanently published tracks and atomic assets you create will appear here. Connect with the same wallet you use as the verified artist to publish.
-        </p>
-      </section>
-
-      <section className={styles.section + ' ' + styles.sectionTight}>
-        <div className={styles.sectionHeader}>
-          <h2 className={styles.sectionTitle}>Generate cover art with Art Engine</h2>
-        </div>
-        <p className={styles.subtext}>
-          Use the Art Engine in this repo to create unique layered artwork. Generate cover art in the browser (Creator tools), then use it when publishing to Arweave (Full — Cover image).
-        </p>
-        <a href="#/vault/creator-tools" className={styles.link}>
-          Creator tools &amp; full steps →
-        </a>
-      </section>
-
-      <section className={styles.section + ' ' + styles.sectionTight}>
-        <div className={styles.sectionHeader}>
-          <h2 className={styles.sectionTitle}>Permaweb profile</h2>
-          {walletType === 'arweave' && isOwn && (
-            <button
-              type="button"
-              className={styles.primaryBtn}
-              onClick={() => (normalizedProfile?.id ? setEditOpen(true) : setCreateOpen(true))}
-            >
-              {normalizedProfile?.id ? 'Edit profile' : 'Create profile'}
-            </button>
-          )}
-        </div>
-
-        {walletType !== 'arweave' ? (
-          <p className={styles.subtext}>Connect <strong>Wander</strong> to create and manage your permaweb profile.</p>
-        ) : loading ? (
-          <LogoSpinner />
-        ) : error ? (
-          walletProfileFallback ? (
-            <div className={styles.profileCard}>
-              <div>
-                <p className={styles.profileName}>{profileName}</p>
-                <p className={styles.subtext}>
-                  Permanent permaweb profile data did not load, so this page is using the connected wallet identity for now.
-                </p>
-              </div>
-              <div className={styles.profileMeta}>
-                <span className={styles.mono}>Wallet route</span>
-                <span className={styles.monoValue}>
-                  {resolvedAddress ? `${String(resolvedAddress).slice(0, 12)}…` : 'Unknown'}
-                </span>
-              </div>
-            </div>
-          ) : (
-            <p className={styles.error}>{error}</p>
-          )
-        ) : normalizedProfile?.id || hasIdentity ? (
-          <div className={styles.profileCard}>
-            <div>
-              <p className={styles.profileName}>{profileName}</p>
-              {profileHandle && <p className={styles.subtext}>@{profileHandle}</p>}
-              <p className={styles.subtext}>{profileBio || 'No description yet.'}</p>
-            </div>
-            <div className={styles.profileMeta}>
-              <span className={styles.mono}>Profile ID</span>
-              <span className={styles.monoValue}>
-                {normalizedProfile?.id ? `${String(normalizedProfile.id).slice(0, 12)}…` : 'Resolving…'}
-              </span>
-            </div>
-          </div>
-        ) : walletProfileFallback ? (
-          <div className={styles.profileCard}>
-            <div>
-              <p className={styles.profileName}>{profileName}</p>
-              <p className={styles.subtext}>
-                No zone-backed permaweb profile is available right now, so StreamVault is falling back to the wallet profile view.
-              </p>
-            </div>
-            <div className={styles.profileMeta}>
-              <span className={styles.mono}>Wallet route</span>
-              <span className={styles.monoValue}>
-                {resolvedAddress ? `${String(resolvedAddress).slice(0, 12)}…` : 'Unknown'}
-              </span>
-            </div>
-          </div>
-        ) : (
-          <p className={styles.subtext}>
-            No permaweb profile found for this wallet yet. Create one to make your identity permanent and creator-first.
-          </p>
-        )}
-      </section>
+      {error && !walletProfileFallback && (
+        <section className={styles.section + ' ' + styles.sectionTight}>
+          <p className={styles.error}>{error}</p>
+        </section>
+      )}
 
       {normalizedProfile?.id && aoTokens.length > 0 && (
         <section className={styles.section + ' ' + styles.sectionTight}>
@@ -1478,16 +1981,16 @@ export function Profile() {
         </section>
       )}
 
-      {normalizedProfile?.id && atomicAssets.length > 0 && (
+      {displayAtomicAssets.length > 0 && (
         <section className={styles.section + ' ' + styles.sectionTight}>
           <div className={styles.sectionHeader}>
             <h2 className={styles.sectionTitle}>Digital assets</h2>
           </div>
           <p className={styles.subtext}>
-            Atomic assets found in profile holdings.
+            Other atomic assets in your profile zone not shown as tracks below.
           </p>
           <div className={styles.sampleList}>
-            {atomicAssets.map((asset) => (
+            {displayAtomicAssets.map((asset) => (
               <div key={`${asset.id}:${asset.rawBalance}`} className={styles.sampleItem}>
                 <div>
                   <span className={styles.mono}>{asset.name}</span>
@@ -1600,7 +2103,7 @@ export function Profile() {
         </section>
       )}
 
-      {arweaveOnlyProfileUploads.length > 0 && (
+      {visibleProfileUploads.length > 0 && (
         <section className={styles.section + ' ' + styles.sectionTight}>
           <div className={styles.sectionHeader}>
             <h2 className={styles.sectionTitle}>
@@ -1612,10 +2115,10 @@ export function Profile() {
               ? 'Permanent uploads on your profile that are not listed in the Audius catalog above.'
               : 'Full uploads stored on your permaweb profile zone. Use arweave.net (or a stored permaweb link) to open the data tx.'}{' '}
             You can also use these clips in the{' '}
-            <a href="#/vault/creator-tools" className={styles.link}>Beat generator</a>.
+            <a href="#/vault/creator-tools" className={styles.link}>Art Engine</a>.
           </p>
           <div className={styles.trackGrid}>
-            {arweaveOnlyProfileUploads.map((sample) => (
+            {visibleProfileUploads.map((sample) => (
               <TrackCard
                 key={sample.txId}
                 track={uploadedTrackToPlayerTrack(sample)}
@@ -1866,10 +2369,10 @@ export function Profile() {
           initialUsername={profileHandle || normalizedProfile?.username || ''}
           initialDisplayName={profileName !== 'Unnamed' ? profileName : ''}
           initialDescription={profileBio || normalizedProfile?.description || ''}
-          initialAvatarUrl={avatarSource}
-          initialBannerUrl={bannerSource}
-          initialThumbnailValue={normalizedProfile?.thumbnail || normalizedProfile?.Thumbnail || null}
-          initialBannerValue={normalizedProfile?.banner || normalizedProfile?.Banner || null}
+          initialAvatarUrl={activeAvatarSource}
+          initialBannerUrl={activeBannerSource}
+          initialThumbnailValue={extractRawProfileMediaRef(normalizedProfile, 'thumbnail')}
+          initialBannerValue={extractRawProfileMediaRef(normalizedProfile, 'banner')}
           onCreate={handleEditProfile}
         />
       )}

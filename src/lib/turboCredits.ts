@@ -49,15 +49,27 @@ export function formatTurboCredits(value: number): string {
 
 export async function fetchTurboBalance(address: string): Promise<TurboBalance> {
   const url = `${TURBO_BALANCE_ENDPOINT}?address=${encodeURIComponent(address)}`;
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`Turbo balance request failed (${response.status})`);
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(12_000) });
+      if (!response.ok) {
+        throw new Error(`Turbo balance request failed (${response.status})`);
+      }
+      const raw = await response.json();
+      return {
+        controlledBalance: parseTurboNumber(raw?.controlledBalance),
+        effectiveBalance: parseTurboNumber(raw?.effectiveBalance),
+        receivedApprovals: Array.isArray(raw?.receivedApprovals) ? raw.receivedApprovals : [],
+        givenApprovals: Array.isArray(raw?.givenApprovals) ? raw.givenApprovals : [],
+      };
+    } catch (error) {
+      lastError = error;
+      if (attempt < 2) {
+        await new Promise((resolve) => window.setTimeout(resolve, 800 * (attempt + 1)));
+      }
+    }
   }
-  const raw = await response.json();
-  return {
-    controlledBalance: parseTurboNumber(raw?.controlledBalance),
-    effectiveBalance: parseTurboNumber(raw?.effectiveBalance),
-    receivedApprovals: Array.isArray(raw?.receivedApprovals) ? raw.receivedApprovals : [],
-    givenApprovals: Array.isArray(raw?.givenApprovals) ? raw.givenApprovals : [],
-  };
+  const message = lastError instanceof Error ? lastError.message : 'Failed to fetch Turbo credits.';
+  throw new Error(message);
 }

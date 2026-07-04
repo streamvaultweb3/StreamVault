@@ -6,7 +6,7 @@ import { useGeneratedCover } from '../context/GeneratedCoverContext';
 import { useGeneratedAudio } from '../context/GeneratedAudioContext';
 import { useAudiusAuth } from '../context/AudiusAuthContext';
 import { type PublishResult } from '../lib/arweave';
-import { getSelectedOrLatestProfileByWallet } from '../lib/permaProfile';
+import { getSelectedOrLatestProfileByWallet, resolveProfilePublicPath } from '../lib/permaProfile';
 import { fetchAudiusStreamAsBlob } from '../lib/audius';
 import { arweaveTxDataUrl, arweaveTxMetaUrl } from '../lib/arweaveDataGateway';
 import { publishFullAsAtomicAsset, createFiatTopUpSession } from '../lib/publish';
@@ -16,6 +16,7 @@ import { appendUploadLedger } from '../lib/uploadLedger';
 import type { UdlConfig, RoyaltySplit, UdlAiUse } from '../lib/udl';
 import { udlToSummary } from '../lib/uploadedTracks';
 import { PublishPrimaryUpload } from './publish/PublishPrimaryUpload';
+import { ListOnUcm } from './ListOnUcm';
 import styles from './PublishModal.module.css';
 
 interface PublishModalProps {
@@ -129,6 +130,14 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
     if (walletType === 'ethereum') return ['turbo-evm'];
     return ['turbo-arweave', 'turbo-solana'];
   }, [walletType]);
+
+  const profileLink = useMemo(() => {
+    const cachedProfileId =
+      address && typeof window !== 'undefined'
+        ? localStorage.getItem(`streamvault:lastProfileId:${address.toLowerCase()}`)
+        : null;
+    return `/#${resolveProfilePublicPath({ walletAddress: address, cachedProfileId })}`;
+  }, [address]);
 
   const activePaymentChip = useMemo(() => {
     if (!useTurbo) return 'l1-ar' as PaymentChip;
@@ -1096,13 +1105,21 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
                 <p className={styles.warningText}>{appendWarning}</p>
                 <a
                   className={styles.warningLink}
-                  href={address ? `/#/profile/${address}` : '/#/profile'}
+                  href={profileLink}
                 >
                   Go to profile
                 </a>
               </div>
             )}
             {result.assetId && <p className={styles.assetId}>Asset ID: {result.assetId.slice(0, 12)}…</p>}
+            {result.assetId ? (
+              <ListOnUcm
+                assetId={result.assetId}
+                title={customTitle || undefined}
+                defaultPriceAr="0.1"
+                className={styles.ucmSuccessBlock}
+              />
+            ) : null}
           </div>
         )}
         {status === 'error' && errorMessage && (

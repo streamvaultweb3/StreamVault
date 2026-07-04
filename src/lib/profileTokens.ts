@@ -1,4 +1,5 @@
 import { resolveProfileMediaUrl } from './permaProfile';
+import { fetchHyperbeamAssetState } from './hbNode';
 
 export type ResolvedProfileToken = {
   id: string;
@@ -82,6 +83,17 @@ async function getTokenInfo(libs: any, tokenId: string): Promise<any> {
       info = await libs.getAtomicAsset(tokenId, { useGateway: true });
       if (info && Object.keys(info).length > 0) source = 'atomicAsset';
     } catch {
+      // fallback below
+    }
+  }
+  if (!info) {
+    try {
+      const hb = await fetchHyperbeamAssetState(tokenId);
+      if (hb?.json && Object.keys(hb.json).length > 0) {
+        info = hb.json;
+        source = 'atomicAsset';
+      }
+    } catch {
       // ignore
     }
   }
@@ -124,7 +136,12 @@ function getKind(info: any, ticker: string, denomination: number): 'ao-token' | 
   return 'unknown';
 }
 
-export async function resolveProfileTokens(libs: any, assets: any[]): Promise<ResolvedProfileToken[]> {
+export async function resolveProfileTokens(
+  libs: any,
+  assets: any[],
+  readLibs?: any
+): Promise<ResolvedProfileToken[]> {
+  const activeLibs = readLibs || libs;
   const list = Array.isArray(assets) ? assets : [];
   const tokens = await Promise.all(
     list.map(async (asset: any): Promise<ResolvedProfileToken | null> => {
@@ -133,7 +150,7 @@ export async function resolveProfileTokens(libs: any, assets: any[]): Promise<Re
       const rawBalance = String(
         pick(asset, ['quantity', 'balance', 'amount', 'Quantity', 'Balance', 'Amount']) || '0'
       );
-      const infoResult = await getTokenInfo(libs, id);
+      const infoResult = await getTokenInfo(activeLibs, id);
       const info = infoResult.data;
       const denomination = parseDenomination(info);
       const name =

@@ -1,5 +1,6 @@
 import type { Track } from '../context/PlayerContext';
-import { arweaveTxDataUrl } from './arweaveDataGateway';
+import { preferredArweaveStreamUrl, arweaveTxDataUrl } from './arweaveDataGateway';
+import { trackSourceBadges } from './trackBadges';
 import type { RoyaltySplit, UdlConfig } from './udl';
 
 export type UploadedTrackUdlSummary = Pick<
@@ -198,7 +199,9 @@ export function matchUploadedTrackToAudiusTrack(
 }
 
 export function uploadedTrackToPlayerTrack(track: UploadedTrackRecord): Track {
-  const artwork = track.artworkTxId ? arweaveTxDataUrl(track.artworkTxId) : track.artworkUrl;
+  const artwork = track.artworkTxId
+    ? preferredArweaveStreamUrl(track.artworkTxId)
+    : track.artworkUrl;
   return {
     id: track.txId,
     title: track.title,
@@ -226,11 +229,16 @@ export function mergeAudiusTrackWithPersistedUpload(audiusTrack: Track, upload: 
 }
 
 export function uploadedTrackLicenseBadges(track: UploadedTrackRecord): string[] {
-  const badges = ['Permanent'];
+  const badges = trackSourceBadges({ assetId: track.assetId, isPermanent: true });
   if (track.udl?.usage?.length) badges.push(`Use: ${track.udl.usage.join(', ')}`);
   if (track.udl?.aiUse) badges.push(`AI: ${track.udl.aiUse}`);
   if (track.udl?.fee && track.udl?.currency) {
     badges.push(`Fee: ${track.udl.fee} ${track.udl.currency}/${track.udl.interval || 'per-stream'}`);
   }
   return badges;
+}
+
+/** Short badges for compact track cards (Permanent + Atomic asset only). */
+export function uploadedTrackCompactBadges(track: UploadedTrackRecord): string[] {
+  return trackSourceBadges({ assetId: track.assetId, isPermanent: true });
 }

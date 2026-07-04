@@ -6,19 +6,22 @@ import Permaweb from '@permaweb/libs';
 import { useWallet } from './WalletContext';
 import { useApi } from '@arweave-wallet-kit/react';
 import { runHbNodeDiagnostics } from '../lib/hbNode';
+import { resolveAoNode, resolveLegacyProfileWriteMuUrl } from '../lib/aoNode';
+import { createResilientAoFetch } from '../lib/aoFetch';
 
 interface PermawebContextValue {
   libs: ReturnType<typeof Permaweb.init> | null;
   isReady: boolean;
   walletAddress: string | null;
-  getWritableLibs: () => Promise<ReturnType<typeof Permaweb.init> | null>;
+  getWritableLibs: (options?: {
+    url?: string;
+    scheduler?: string;
+    authority?: string;
+    mode?: 'mainnet' | 'legacy';
+  }) => Promise<ReturnType<typeof Permaweb.init> | null>;
 }
 
 const PermawebContext = createContext<PermawebContextValue | null>(null);
-/** Same HB base as `@permaweb/aoconnect` mainnet default (`tee-6.forward.computer`). */
-const DEFAULT_MAINNET_AO_URL = 'https://tee-6.forward.computer';
-const DEFAULT_MAINNET_AO_AUTHORITY = 'fcoN_xJeisVsPXA-trzVAuIiqO3ydLQxM-L4XbrQKzY';
-const DEFAULT_MAINNET_AO_SCHEDULER = 'n_XZJhUnmldNFo4dhajoPZWhBXuJk-OcQr5JQ49c4Zo';
 const DEFAULT_ARWEAVE_GATEWAY = {
   host: 'arweave.net',
   port: 443,
@@ -40,6 +43,10 @@ function cleanEnv(value: string | undefined): string | null {
   return trimmed ? trimmed : null;
 }
 
+function resolveMainnetNode() {
+  return resolveAoNode();
+}
+
 export function PermawebProvider({ children }: { children: React.ReactNode }) {
   const { walletType, address } = useWallet();
   const arweaveApi = useApi();
@@ -55,26 +62,49 @@ export function PermawebProvider({ children }: { children: React.ReactNode }) {
   const [walletAddress, setWalletAddress] = useState<string | null>(null);
   const [walletInjectEpoch, setWalletInjectEpoch] = useState(0);
 
-  const getWritableLibs = async (): Promise<ReturnType<typeof Permaweb.init> | null> => {
+  const getWritableLibs = async (options?: {
+    url?: string;
+    scheduler?: string;
+    authority?: string;
+    mode?: 'mainnet' | 'legacy';
+  }): Promise<ReturnType<typeof Permaweb.init> | null> => {
     const injectedWallet = (typeof window !== 'undefined' && (window as any).arweaveWallet) || null;
-    const signerWallet = injectedWallet || (hasWalletKitApi ? arweaveApi : null);
-    if (!signerWallet || walletType !== 'arweave' || !address) return null;
+    if (!injectedWallet || walletType !== 'arweave' || !address) return null;
 
-    const aoMode = ((import.meta.env.VITE_AO_MODE as string | undefined) || 'mainnet').toLowerCase();
-    const muUrl = cleanEnv(import.meta.env.VITE_AO_MU_URL as string | undefined) || DEFAULT_MAINNET_AO_URL;
+    if (injectedWallet.connect) {
+      await injectedWallet.connect([
+        'ACCESS_ADDRESS',
+        'ACCESS_PUBLIC_KEY',
+        'SIGN_TRANSACTION',
+        'SIGNATURE',
+        'DISPATCH',
+      ]);
+    }
+
+    const aoMode =
+      options?.mode ||
+      (((import.meta.env.VITE_AO_MODE as string | undefined) || 'mainnet').toLowerCase() === 'legacy'
+        ? 'legacy'
+        : 'mainnet');
+    const node = resolveMainnetNode();
+    const muUrl =
+      aoMode === 'legacy'
+        ? resolveLegacyProfileWriteMuUrl()
+        : cleanEnv(import.meta.env.VITE_AO_MU_URL as string | undefined) || node.url;
     const cuUrl = cleanEnv(import.meta.env.VITE_AO_CU_URL as string | undefined) || 'https://forward.computer';
     const gatewayUrl = cleanEnv(import.meta.env.VITE_AO_GATEWAY_URL as string | undefined) || 'https://arweave.net';
     const gqlUrlRaw =
       cleanEnv(import.meta.env.VITE_AO_GQL_URL as string | undefined) ||
       'https://ao-search-gateway.goldsky.com/graphql';
-    const aoUrl = cleanEnv(import.meta.env.VITE_AO_URL as string | undefined) || DEFAULT_MAINNET_AO_URL;
-    const aoScheduler =
-      cleanEnv(import.meta.env.VITE_AO_SCHEDULER as string | undefined) ||
-      DEFAULT_MAINNET_AO_SCHEDULER;
-    const aoAuthority =
-      cleanEnv(import.meta.env.VITE_AO_AUTHORITY as string | undefined) ||
-      DEFAULT_MAINNET_AO_AUTHORITY;
+    const aoUrl =
+      aoMode === 'legacy'
+        ? muUrl
+        : cleanEnv(options?.url) || node.url;
+    const aoScheduler = cleanEnv(options?.scheduler) || node.scheduler;
+    const aoAuthority = cleanEnv(options?.authority) || node.authority;
     const profileGateway = toGatewayHost(gqlUrlRaw);
+    const signer = createDataItemSigner(injectedWallet);
+    const resilientFetch = createResilientAoFetch();
 
     const ao =
       aoMode === 'mainnet'
@@ -82,6 +112,8 @@ export function PermawebProvider({ children }: { children: React.ReactNode }) {
           MODE: 'mainnet',
           URL: aoUrl,
           SCHEDULER: aoScheduler,
+          signer,
+          fetch: resilientFetch,
         } as any)
         : connect({
           MODE: 'legacy',
@@ -89,7 +121,9 @@ export function PermawebProvider({ children }: { children: React.ReactNode }) {
           CU_URL: cuUrl,
           GATEWAY_URL: gatewayUrl,
           GRAPHQL_URL: gqlUrlRaw,
-        });
+          signer,
+          fetch: resilientFetch,
+        } as any);
 
     return Permaweb.init({
       ao,
@@ -100,7 +134,7 @@ export function PermawebProvider({ children }: { children: React.ReactNode }) {
         authority: aoAuthority,
         scheduler: aoScheduler,
       },
-      signer: createDataItemSigner(signerWallet),
+      signer,
     });
   };
 
@@ -123,19 +157,16 @@ export function PermawebProvider({ children }: { children: React.ReactNode }) {
       const injectedWallet = (typeof window !== 'undefined' && (window as any).arweaveWallet) || null;
       const signerWallet = injectedWallet || (hasWalletKitApi ? arweaveApi : null);
       const aoMode = ((import.meta.env.VITE_AO_MODE as string | undefined) || 'mainnet').toLowerCase();
-      const muUrl = cleanEnv(import.meta.env.VITE_AO_MU_URL as string | undefined) || DEFAULT_MAINNET_AO_URL;
+      const node = resolveMainnetNode();
+      const muUrl = cleanEnv(import.meta.env.VITE_AO_MU_URL as string | undefined) || node.url;
       const cuUrl = cleanEnv(import.meta.env.VITE_AO_CU_URL as string | undefined) || 'https://forward.computer';
       const gatewayUrl = cleanEnv(import.meta.env.VITE_AO_GATEWAY_URL as string | undefined) || 'https://arweave.net';
       const gqlUrlRaw =
         cleanEnv(import.meta.env.VITE_AO_GQL_URL as string | undefined) ||
         'https://ao-search-gateway.goldsky.com/graphql';
-      const aoUrl = cleanEnv(import.meta.env.VITE_AO_URL as string | undefined) || DEFAULT_MAINNET_AO_URL;
-      const aoScheduler =
-        cleanEnv(import.meta.env.VITE_AO_SCHEDULER as string | undefined) ||
-        DEFAULT_MAINNET_AO_SCHEDULER;
-      let aoAuthority =
-        cleanEnv(import.meta.env.VITE_AO_AUTHORITY as string | undefined) ||
-        DEFAULT_MAINNET_AO_AUTHORITY;
+      const aoUrl = node.url;
+      const aoScheduler = node.scheduler;
+      const aoAuthority = node.authority;
       const gqlUrl = gqlUrlRaw;
       const profileGateway = toGatewayHost(gqlUrlRaw);
 
@@ -216,9 +247,7 @@ export function PermawebProvider({ children }: { children: React.ReactNode }) {
     const pid =
       String(import.meta.env.VITE_HB_DIAG_PID || '').trim() ||
       '7lKyXPtsnJBVCcoz9QFpU2ZKbJD_wUKdxmzz7Rs9e-k';
-    const node =
-      String(import.meta.env.VITE_AO_URL || '').trim() ||
-      DEFAULT_MAINNET_AO_URL;
+    const node = resolveMainnetNode().url;
     runHbNodeDiagnostics(pid, node).catch((e) => {
       console.warn('[hb:diag] failed', e);
     });

@@ -11,6 +11,8 @@
     "diag:ao": "node tools/ao-diagnostics.mjs"
   },
   "dependencies": {
+    "@ar.io/sdk": "^4.0.3",
+    "@ar.io/wayfinder-core": "^2.0.0",
     "@ardrive/turbo-sdk": "^1.41.0",
     "@arweave-wallet-kit/browser-wallet-strategy": "^0.1.1",
     "@arweave-wallet-kit/core": "^0.1.1",
@@ -20,6 +22,7 @@
     "@audius/sdk": "^4.2.0",
     "@permaweb/aoconnect": "^0.0.93",
     "@permaweb/libs": "^0.0.91",
+    "@permaweb/ucm": "^0.0.18",
     "@vela-ventures/aosync-strategy": "^1.0.13",
     "@wanderapp/connect": "^0.1.13",
     "arweave": "^1.15.7",

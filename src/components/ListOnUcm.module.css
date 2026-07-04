@@ -1,0 +1,149 @@
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.header {
+  margin-bottom: 2px;
+}
+
+.title {
+  margin: 0;
+  font-size: var(--text-base);
+  font-weight: var(--font-semibold);
+}
+
+.subtitle {
+  margin: 4px 0 0;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.hint {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  line-height: 1.45;
+}
+
+.balance {
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+.label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.input {
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--bg-glass-border);
+  background: var(--bg-glass);
+  color: var(--text-primary);
+}
+
+.listBtn {
+  padding: 12px 16px;
+  border-radius: var(--radius-md);
+  background: var(--accent);
+  color: #fff;
+  font-weight: var(--font-semibold);
+}
+
+.listBtn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.success {
+  color: #4ade80;
+  font-size: var(--text-sm);
+  margin: 0;
+}
+
+.error {
+  color: #f87171;
+  font-size: var(--text-sm);
+  margin: 0;
+}
+
+.links {
+  font-size: var(--text-sm);
+}
+
+.links a {
+  color: var(--accent);
+}
+
+.panelCompact {
+  gap: 8px;
+}
+
+.formRow {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.balanceNote {
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+}
+
+.activeSection {
+  margin-top: 4px;
+}
+
+.activeHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.activeTitle {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: var(--font-semibold);
+}
+
+.refreshOrdersBtn,
+.cancelBtn {
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--bg-glass-border);
+  background: var(--bg-glass);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+}
+
+.activeList {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.activeItem {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--bg-glass-border);
+}
+
+.activeQty {
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}

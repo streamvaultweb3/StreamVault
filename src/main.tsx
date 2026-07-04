@@ -14,6 +14,10 @@ import WanderStrategy from '@arweave-wallet-kit/wander-strategy';
 import BrowserWalletStrategy from '@arweave-wallet-kit/browser-wallet-strategy';
 import AoSyncStrategy from '@vela-ventures/aosync-strategy';
 import './styles/global.css';
+import { warmWayfinderGateways } from './lib/wayfinder';
+
+// Warm AR.IO Wayfinder peer list so first play/artwork resolve is faster.
+warmWayfinderGateways();
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

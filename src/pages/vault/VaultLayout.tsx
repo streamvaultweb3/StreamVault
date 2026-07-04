@@ -119,8 +119,7 @@ function IconTools({ className }: IconProps) {
   );
 }
 
-/** Re-enable when Creator tools is ready; hiding keeps the mobile Vault nav on one row (9 cols + upload). */
-const SHOW_CREATOR_TOOLS_IN_VAULT_NAV = false;
+const SHOW_CREATOR_TOOLS_IN_VAULT_NAV = true;
 
 export function VaultLayout() {
   const { address, walletType } = useWallet();
@@ -139,7 +138,7 @@ export function VaultLayout() {
     { to: '/vault/rewards', end: false, label: 'Rewards', icon: IconRewards },
     { to: '/vault/playlists', end: false, label: 'Playlists', icon: IconPlaylists },
     ...(SHOW_CREATOR_TOOLS_IN_VAULT_NAV
-      ? [{ to: '/vault/creator-tools' as const, end: false, label: 'Creator tools', icon: IconTools }]
+      ? [{ to: '/vault/creator-tools' as const, end: false, label: 'Art Engine', icon: IconTools }]
       : []),
   ];
 
