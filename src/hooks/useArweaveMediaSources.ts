@@ -38,7 +38,7 @@ export function useArweaveMediaSources(raw: unknown) {
     return () => {
       cancelled = true;
     };
-  }, [raw, staticSources.join('|')]);
+  }, [raw]);
 
   const onError = useCallback(() => {
     setIndex((current) => current + 1);
