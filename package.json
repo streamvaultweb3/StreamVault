@@ -12,7 +12,6 @@
   },
   "dependencies": {
     "@ar.io/sdk": "^4.0.3",
-    "@ar.io/wayfinder-core": "^2.0.0",
     "@ardrive/turbo-sdk": "^1.41.0",
     "@arweave-wallet-kit/browser-wallet-strategy": "^0.1.1",
     "@arweave-wallet-kit/core": "^0.1.1",

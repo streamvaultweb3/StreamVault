@@ -1,23 +1,10 @@
 /**
- * AR.IO Wayfinder integration for resilient Arweave data access.
+ * Resilient Arweave data URL resolution without probing the full AR.IO peer network.
  *
- * Uses FastestPingRoutingStrategy (recommended for most permaweb apps) to pick
- * the lowest-latency AR.IO gateway that has the requested data, with static
- * path-style fallbacks when sandbox routing is unavailable.
- *
- * @see https://github.com/ar-io/wayfinder
+ * Uses path-style Range probes on a small curated gateway list (arweave.net, turbo-gateway.com)
+ * instead of @ar.io/wayfinder-core FastestPing, which HEAD-pings every trusted peer and floods
+ * the console/network when many artworks load at once.
  */
-import {
-  CompositeGatewaysProvider,
-  CompositeRoutingStrategy,
-  FastestPingRoutingStrategy,
-  RandomRoutingStrategy,
-  SimpleCacheGatewaysProvider,
-  StaticGatewaysProvider,
-  TrustedPeersGatewaysProvider,
-  createWayfinderClient,
-  type Wayfinder,
-} from '@ar.io/wayfinder-core';
 import {
   ARWEAVE_PUBLIC_DATA_GATEWAY_BASES,
   ARWEAVE_RELIABLE_DATA_GATEWAY_BASES,
@@ -25,21 +12,11 @@ import {
   preferredArweaveStreamUrl,
 } from './arweaveDataGateway';
 
-const WAYFINDER_PING_TIMEOUT_MS = 1_500;
 const PATH_STYLE_PING_TIMEOUT_MS = 2_000;
 const RESOLVE_CACHE_TTL_MS = 5 * 60_000;
-const GATEWAY_CACHE_TTL_SECONDS = 300;
 
 const resolveCache = new Map<string, { url: string; expiresAt: number }>();
-
-let wayfinderClient: Wayfinder | null = null;
-let wayfinderInitFailed = false;
-
-function staticGatewayUrls(): string[] {
-  return [...ARWEAVE_RELIABLE_DATA_GATEWAY_BASES, ...ARWEAVE_PUBLIC_DATA_GATEWAY_BASES].filter(
-    (url, index, all) => all.indexOf(url) === index
-  );
-}
+const resolveInflight = new Map<string, Promise<string[]>>();
 
 /** Sandbox / path URLs on hosts that often hang after redirect without a VPN. */
 function isUnreliableGatewayUrl(url: string): boolean {
@@ -59,48 +36,6 @@ function demoteUnreliableGatewayUrls(urls: string[]): string[] {
   return reliable;
 }
 
-function getWayfinderClient(): Wayfinder | null {
-  if (wayfinderInitFailed) return null;
-  if (wayfinderClient) return wayfinderClient;
-
-  try {
-    const gatewaysProvider = new SimpleCacheGatewaysProvider({
-      ttlSeconds: GATEWAY_CACHE_TTL_SECONDS,
-      gatewaysProvider: new CompositeGatewaysProvider({
-        providers: [
-          new TrustedPeersGatewaysProvider({
-            trustedGateway: 'https://turbo-gateway.com',
-          }),
-          new StaticGatewaysProvider({
-            gateways: staticGatewayUrls(),
-          }),
-        ],
-      }),
-    });
-
-    // FastestPing first (HEAD probe for the tx), then random AR.IO peer if pings fail.
-    const strategy = new CompositeRoutingStrategy({
-      strategies: [
-        new FastestPingRoutingStrategy({
-          timeoutMs: WAYFINDER_PING_TIMEOUT_MS,
-          gatewaysProvider,
-        }),
-        new RandomRoutingStrategy({
-          gatewaysProvider,
-        }),
-      ],
-    });
-
-    wayfinderClient = createWayfinderClient({
-      routingSettings: { strategy },
-    });
-    return wayfinderClient;
-  } catch {
-    wayfinderInitFailed = true;
-    return null;
-  }
-}
-
 function cacheResolvedUrl(txId: string, url: string) {
   resolveCache.set(txId, { url, expiresAt: Date.now() + RESOLVE_CACHE_TTL_MS });
 }
@@ -116,8 +51,7 @@ function readCachedUrl(txId: string): string | null {
 }
 
 /**
- * Path-style FastestPing: Range-GET `/{txId}` on each static gateway (no AR.IO sandbox subdomain).
- * Used when Wayfinder sandbox routing fails (common on non-AR.IO hosts).
+ * Path-style FastestPing: Range-GET `/{txId}` on each curated gateway (no AR.IO sandbox subdomain).
  */
 async function resolvePathStyleFastest(txId: string): Promise<string | null> {
   const id = normalizeArweaveTxId(txId);
@@ -150,59 +84,67 @@ async function resolvePathStyleFastest(txId: string): Promise<string | null> {
   });
 }
 
-async function resolveViaWayfinder(txId: string): Promise<string | null> {
-  const client = getWayfinderClient();
-  if (!client) return null;
-  try {
-    const url = await client.resolveUrl({ txId });
-    return String(url);
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Resolve the best data URL for a tx id via Wayfinder (FastestPing), then path-style ping,
- * then static Turbo/permagate defaults.
- */
-export async function resolveWayfinderDataUrl(txId: string): Promise<string> {
+async function resolveWayfinderDataUrlsInternal(txId: string): Promise<string[]> {
   const id = normalizeArweaveTxId(txId);
-  if (!id) return preferredArweaveStreamUrl(txId);
+  if (!id) return [preferredArweaveStreamUrl(txId)];
 
   const cached = readCachedUrl(id);
-  if (cached) return cached;
-
-  const wayfinderUrl = await resolveViaWayfinder(id);
-  if (wayfinderUrl && !isUnreliableGatewayUrl(wayfinderUrl)) {
-    cacheResolvedUrl(id, wayfinderUrl);
-    return wayfinderUrl;
-  }
+  const urls: string[] = [];
+  if (cached) urls.push(cached);
 
   const pathStyleUrl = await resolvePathStyleFastest(id);
   if (pathStyleUrl) {
     cacheResolvedUrl(id, pathStyleUrl);
-    return pathStyleUrl;
+    if (!urls.includes(pathStyleUrl)) urls.unshift(pathStyleUrl);
   }
 
-  return preferredArweaveStreamUrl(id);
-}
+  if (urls.length === 0) {
+    urls.push(preferredArweaveStreamUrl(id));
+  }
 
-/**
- * Ordered candidate URLs: Wayfinder winner first, then static public gateways.
- * Safe for `<img onError>` / audio error fallback chains.
- */
-export async function resolveWayfinderDataUrls(txId: string): Promise<string[]> {
-  const id = normalizeArweaveTxId(txId);
-  const primary = await resolveWayfinderDataUrl(id);
-  const urls = [primary];
   for (const base of ARWEAVE_PUBLIC_DATA_GATEWAY_BASES) {
     const url = `${base}/${id}`;
     if (!urls.includes(url)) urls.push(url);
   }
+
   return demoteUnreliableGatewayUrls(urls);
 }
 
-/** Warm the gateway peer list in the background (call once on app start). */
-export function warmWayfinderGateways(): void {
-  void getWayfinderClient();
+/**
+ * Resolve the best data URL for a tx id via curated path-style probes, then static gateways.
+ */
+export async function resolveWayfinderDataUrl(txId: string): Promise<string> {
+  const urls = await resolveWayfinderDataUrls(txId);
+  return urls[0] || preferredArweaveStreamUrl(txId);
 }
+
+/**
+ * Ordered candidate URLs: fastest curated gateway first, then static public gateways.
+ * Safe for `<img onError>` / audio error fallback chains. Concurrent calls share one probe per tx id.
+ */
+export async function resolveWayfinderDataUrls(txId: string): Promise<string[]> {
+  const id = normalizeArweaveTxId(txId);
+  if (!id) return [preferredArweaveStreamUrl(txId)];
+
+  const cached = readCachedUrl(id);
+  if (cached) {
+    const urls = [cached];
+    for (const base of ARWEAVE_PUBLIC_DATA_GATEWAY_BASES) {
+      const url = `${base}/${id}`;
+      if (!urls.includes(url)) urls.push(url);
+    }
+    return demoteUnreliableGatewayUrls(urls);
+  }
+
+  const inflight = resolveInflight.get(id);
+  if (inflight) return inflight;
+
+  const run = resolveWayfinderDataUrlsInternal(id).finally(() => {
+    resolveInflight.delete(id);
+  });
+  resolveInflight.set(id, run);
+  return run;
+}
+
+/** No-op — kept for call sites; path-style probes run on demand per tx id. */
+export function warmWayfinderGateways(): void {}
