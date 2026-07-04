@@ -1,9 +1,10 @@
-import type { ReactNode } from 'react';
+import { type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import type { Track } from '../context/PlayerContext';
 import { usePlayer } from '../context/PlayerContext';
 import { trackDetailPath } from '../lib/arweaveTxDetail';
 import { defaultArtistHrefForTrack } from '../lib/arweaveArtist';
+import { useArweaveMediaSources } from '../hooks/useArweaveMediaSources';
 import styles from './TrackCard.module.css';
 
 interface TrackCardProps {
@@ -34,6 +35,7 @@ export function TrackCard({
   const isCurrent = currentTrack?.id === track.id;
   const artistTo = artistHref ?? defaultArtistHrefForTrack(track) ?? `/artist/${track.artistId}`;
   const titleTo = titleHref ?? defaultTitleHref(track);
+  const { src: artworkSource, onError: onArtworkError } = useArweaveMediaSources(track.artwork || '');
 
   const handlePlay = () => {
     if (isCurrent && isPlaying) pause();
@@ -43,8 +45,14 @@ export function TrackCard({
   return (
     <div className={styles.card + ' glass'}>
       <button type="button" className={styles.coverWrap} onClick={handlePlay}>
-        {track.artwork ? (
-          <img src={track.artwork} alt="" className={styles.cover} loading="lazy" />
+        {artworkSource ? (
+          <img
+            src={artworkSource}
+            alt=""
+            className={styles.cover}
+            loading="lazy"
+            onError={onArtworkError}
+          />
         ) : (
           <div className={styles.coverPlaceholder} aria-hidden="true" />
         )}

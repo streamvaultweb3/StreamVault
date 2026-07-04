@@ -1,7 +1,10 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useWallet } from '../../context/WalletContext';
 import { searchTracksOnAO } from '../../lib/aoMusicRegistry';
-import { aoRecordsToTracks } from '../../lib/arweaveDiscovery';
+import {
+  queryAtomicAssetsByCreator,
+  queryPermanentUploadsByOwner,
+} from '../../lib/arweaveDiscovery';
 import { TrackCard } from '../../components/TrackCard';
 import { UploadedTrackMeta } from '../../components/UploadedTrackMeta';
 import { Link } from 'react-router-dom';
@@ -19,6 +22,7 @@ import {
   type AudiusTrack,
 } from '../../lib/audius';
 import { PublishModal } from '../../components/PublishModal';
+import { resolveProfilePublicPath } from '../../lib/permaProfile';
 import { arweaveArtistPath } from '../../lib/arweaveArtist';
 import { readUploadLedger } from '../../lib/uploadLedger';
 import { arweaveTxDataUrl } from '../../lib/arweaveDataGateway';
@@ -26,17 +30,105 @@ import {
   matchUploadedTrackToAudiusTrack,
   mergeAudiusTrackWithPersistedUpload,
   normalizeUploadedTrackRecord,
-  uploadedTrackShareUrl,
   uploadedTrackToPlayerTrack,
   type UploadedTrackRecord,
 } from '../../lib/uploadedTracks';
 import styles from './Vault.module.css';
 
+function mergeLibraryUploads(args: {
+  walletAddress: string;
+  ledgerRows: UploadedTrackRecord[];
+  chainUploads: UploadedTrackRecord[];
+  atomicAssets: Awaited<ReturnType<typeof queryAtomicAssetsByCreator>>;
+  aoRecords: Awaited<ReturnType<typeof searchTracksOnAO>>;
+}): UploadedTrackRecord[] {
+  const byTx = new Map<string, UploadedTrackRecord>();
+
+  for (const row of args.ledgerRows) {
+    if (row.tier === 'sample') continue;
+    byTx.set(row.txId, row);
+  }
+  for (const row of args.chainUploads) {
+    const prev = byTx.get(row.txId);
+    byTx.set(row.txId, {
+      ...prev,
+      ...row,
+      assetId: row.assetId || prev?.assetId,
+      walletAddress: row.walletAddress || prev?.walletAddress || args.walletAddress,
+    });
+  }
+  for (const asset of args.atomicAssets) {
+    if (!asset.audioTxId) continue;
+    const prev = byTx.get(asset.audioTxId);
+    byTx.set(asset.audioTxId, {
+      ...prev,
+      txId: asset.audioTxId,
+      title: prev?.title || asset.title,
+      artist: prev?.artist || asset.artist,
+      assetId: asset.assetId,
+      artworkTxId: prev?.artworkTxId || asset.artworkTxId,
+      walletAddress: prev?.walletAddress || asset.walletAddress || args.walletAddress,
+      createdAt: prev?.createdAt || asset.createdAt || new Date(0).toISOString(),
+      permawebUrl: prev?.permawebUrl || arweaveTxDataUrl(asset.audioTxId),
+    });
+  }
+  for (const row of args.aoRecords) {
+    const prev = byTx.get(row.audioTxId);
+    byTx.set(row.audioTxId, {
+      ...prev,
+      txId: row.audioTxId,
+      title: row.tags?.Title || prev?.title || 'Untitled',
+      artist: row.tags?.Artist || prev?.artist || '',
+      assetId: row.assetId || prev?.assetId,
+      createdAt: row.createdAt
+        ? new Date(row.createdAt * 1000).toISOString()
+        : prev?.createdAt || new Date(0).toISOString(),
+      walletAddress: row.creator || prev?.walletAddress || args.walletAddress,
+      permawebUrl: prev?.permawebUrl || arweaveTxDataUrl(row.audioTxId),
+      udl: row.udl
+        ? {
+            licenseId: row.udl.licenseId,
+            usage: row.udl.usage,
+            aiUse: row.udl.aiUse,
+            fee: row.udl.fee,
+            currency: row.udl.currency,
+            interval: row.udl.interval,
+            attribution: row.udl.attribution,
+            uri: row.udl.uri,
+          }
+        : prev?.udl,
+    });
+  }
+
+  return Array.from(byTx.values()).sort(
+    (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+  );
+}
+
+async function loadLibraryUploads(walletAddress: string): Promise<UploadedTrackRecord[]> {
+  const ledgerRows = readUploadLedger([walletAddress])
+    .map((row) => normalizeUploadedTrackRecord(row))
+    .filter(Boolean) as UploadedTrackRecord[];
+
+  const [chainUploads, atomicAssets, aoRecords] = await Promise.all([
+    queryPermanentUploadsByOwner(walletAddress, 50).catch(() => [] as UploadedTrackRecord[]),
+    queryAtomicAssetsByCreator(walletAddress, 50).catch(() => []),
+    searchTracksOnAO({ creator: walletAddress }).catch(() => []),
+  ]);
+
+  return mergeLibraryUploads({
+    walletAddress,
+    ledgerRows,
+    chainUploads,
+    atomicAssets,
+    aoRecords,
+  });
+}
+
 export function VaultLibrary() {
   const { address } = useWallet();
   const { audiusUser, login, apiKeyConfigured, isLoggingIn, authError } = useAudiusAuth();
-  const [tracks, setTracks] = useState<Track[]>([]);
-  const [uploadedTracks, setUploadedTracks] = useState<UploadedTrackRecord[]>([]);
+  const [libraryUploads, setLibraryUploads] = useState<UploadedTrackRecord[]>([]);
   const [audiusTracks, setAudiusTracks] = useState<Track[]>([]);
   const [audiusPlaylists, setAudiusPlaylists] = useState<AudiusPlaylist[]>([]);
   const [audiusAlbums, setAudiusAlbums] = useState<AudiusAlbum[]>([]);
@@ -47,6 +139,14 @@ export function VaultLibrary() {
   const [publishTrack, setPublishTrack] = useState<Track | null>(null);
   const [activeTab, setActiveTab] = useState<'tracks' | 'audius'>('tracks');
   const lastAutoOpenedAudiusHandleRef = useRef<string | null>(null);
+
+  const profileHref = useMemo(() => {
+    const cachedProfileId =
+      address && typeof window !== 'undefined'
+        ? localStorage.getItem(`streamvault:lastProfileId:${address.toLowerCase()}`)
+        : null;
+    return resolveProfilePublicPath({ walletAddress: address, cachedProfileId });
+  }, [address]);
 
   const mapAudiusTrack = (a: AudiusTrack): Track => ({
     id: a.id,
@@ -70,55 +170,40 @@ export function VaultLibrary() {
 
   useEffect(() => {
     if (!address) {
-      setTracks([]);
-      setUploadedTracks([]);
+      setLibraryUploads([]);
       setLoading(false);
       return;
     }
-    let cancelled = false;
-    setLoading(true);
-    setError(null);
-    searchTracksOnAO({ creator: address })
-      .then((records) => {
-        if (!cancelled) setTracks(aoRecordsToTracks(records));
-      })
-      .catch((e: any) => {
-        if (!cancelled) setError(e?.message ?? 'Failed to load library.');
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => { cancelled = true; };
-  }, [address]);
 
-  useEffect(() => {
-    if (!address) {
-      setUploadedTracks([]);
-      return;
-    }
+    let cancelled = false;
+
     const reload = () => {
-      const rows = readUploadLedger([address])
-        .map((row) => normalizeUploadedTrackRecord(row))
-        .filter(Boolean) as UploadedTrackRecord[];
-      setUploadedTracks(
-        rows
-          .filter((row) => row.tier !== 'sample')
-          .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-      );
+      setLoading(true);
+      setError(null);
+      void loadLibraryUploads(address)
+        .then((rows) => {
+          if (!cancelled) setLibraryUploads(rows);
+        })
+        .catch((e: unknown) => {
+          if (!cancelled) {
+            setLibraryUploads([]);
+            setError((e as { message?: string })?.message ?? 'Failed to load library.');
+          }
+        })
+        .finally(() => {
+          if (!cancelled) setLoading(false);
+        });
     };
+
     reload();
     window.addEventListener('streamvault:profile-updated', reload);
     window.addEventListener('streamvault:uploads-updated', reload);
     return () => {
+      cancelled = true;
       window.removeEventListener('streamvault:profile-updated', reload);
       window.removeEventListener('streamvault:uploads-updated', reload);
     };
   }, [address]);
-
-  const uploadedLookup = new Map<string, UploadedTrackRecord>();
-  for (const upload of uploadedTracks) {
-    uploadedLookup.set(upload.txId, upload);
-  }
 
   useEffect(() => {
     let cancelled = false;
@@ -182,8 +267,8 @@ export function VaultLibrary() {
     <>
       <h1 className={styles.sectionTitle}>Library</h1>
       <p className={styles.sectionSubtitle}>
-        Your uploads from the AO Music Registry. Samples are on your{' '}
-        <Link to={address ? `/profile/${address}` : '#'} style={{ color: 'var(--accent)', textDecoration: 'underline' }}>
+        Your permanent Arweave uploads indexed from the permaweb and AO Music Registry. Samples are on your{' '}
+        <Link to={profileHref} style={{ color: 'var(--accent)', textDecoration: 'underline' }}>
           profile
         </Link>.
       </p>
@@ -278,7 +363,7 @@ export function VaultLibrary() {
                   )}
                   <section className={styles.grid}>
                     {audiusTracks.map((track) => {
-                      const matchedUpload = matchUploadedTrackToAudiusTrack(uploadedTracks, track);
+                      const matchedUpload = matchUploadedTrackToAudiusTrack(libraryUploads, track);
                       const trackForCard = matchedUpload ? mergeAudiusTrackWithPersistedUpload(track, matchedUpload) : track;
                       return (
                         <TrackCard
@@ -335,58 +420,24 @@ export function VaultLibrary() {
           {loading ? (
             <p className={styles.loading}>Loading…</p>
           ) : (
-            <>
-              {uploadedTracks.length > 0 && (
-                <section className={styles.grid} style={{ marginBottom: '24px' }}>
-                  {uploadedTracks.map((track) => (
-                    <TrackCard
-                      key={track.txId}
-                      track={uploadedTrackToPlayerTrack(track)}
-                      artistHref={arweaveArtistPath(address)}
-                      showPermanentBadge={false}
-                      footerContent={
-                        <>
-                          <span className={styles.sourcePill}>Arweave</span>
-                          <UploadedTrackMeta track={track} compact />
-                        </>
-                      }
-                    />
-                  ))}
-                </section>
-              )}
-              <section className={styles.grid}>
-                {tracks.map((track) => {
-                  const uploaded = uploadedLookup.get(track.permaTxId || track.id);
-                  const displayTrack = uploaded
-                    ? {
-                        ...track,
-                        streamUrl: uploadedTrackShareUrl(uploaded),
-                        artwork: uploaded.artworkTxId
-                          ? arweaveTxDataUrl(uploaded.artworkTxId)
-                          : uploaded.artworkUrl || track.artwork,
-                      }
-                    : track;
-                  return (
-                    <TrackCard
-                      key={track.id}
-                      track={displayTrack}
-                      artistHref={arweaveArtistPath(address)}
-                      showPermanentBadge={false}
-                      footerContent={
-                        uploaded ? (
-                          <>
-                            <span className={styles.sourcePill}>Arweave</span>
-                            <UploadedTrackMeta track={uploaded} compact />
-                          </>
-                        ) : undefined
-                      }
-                    />
-                  );
-                })}
-              </section>
-            </>
+            <section className={styles.grid}>
+              {libraryUploads.map((track) => (
+                <TrackCard
+                  key={track.txId}
+                  track={uploadedTrackToPlayerTrack(track)}
+                  artistHref={arweaveArtistPath(address)}
+                  showPermanentBadge={false}
+                  footerContent={
+                    <>
+                      <span className={styles.sourcePill}>Arweave</span>
+                      <UploadedTrackMeta track={track} compact />
+                    </>
+                  }
+                />
+              ))}
+            </section>
           )}
-          {!loading && !error && tracks.length === 0 && uploadedTracks.length === 0 && (
+          {!loading && !error && libraryUploads.length === 0 && (
             <p className={styles.placeholderBox}>You have not published any full tracks yet. Use Upload to publish an atomic asset.</p>
           )}
         </>

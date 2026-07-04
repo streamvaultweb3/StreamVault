@@ -1,4 +1,5 @@
 import { defineConfig, type Plugin } from 'vite';
+import path from 'path';
 import react from '@vitejs/plugin-react';
 import { nodePolyfills } from 'vite-plugin-node-polyfills';
 import { VitePWA } from 'vite-plugin-pwa';
@@ -124,6 +125,14 @@ export default defineConfig({
   resolve: {
     alias: [
       { find: '@', replacement: '/src' },
+      {
+        find: '@permaweb/aoconnect',
+        replacement: path.resolve(__dirname, 'node_modules/@permaweb/aoconnect/dist/browser.js'),
+      },
+      {
+        find: '@permaweb/ucm',
+        replacement: path.resolve(__dirname, 'node_modules/@permaweb/ucm/dist/browser.js'),
+      },
       { find: 'rpc-websockets', replacement: '/src/shims/rpc-websockets.js' },
       { find: 'rpc-websockets/dist/index.browser.cjs', replacement: '/src/shims/rpc-websockets.js' },
     ],

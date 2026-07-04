@@ -1,11 +1,12 @@
 import { connect, createDataItemSigner } from '@permaweb/aoconnect';
+import { AO_NODE } from './aoNode';
 
-/** Matches `@permaweb/aoconnect` mainnet `DEFAULT_HB_URL` (avoid `push.forward`, which can overload the browser). */
-export const MAINNET_AO_URL = 'https://tee-6.forward.computer';
+/** Portal-aligned HyperBEAM node for StreamVault spawns and reads. */
+export const MAINNET_AO_URL = AO_NODE.url;
 export const MAINNET_AO_MODULE = 'ISShJH1ij-hPPt9St5UFFr_8Ys3Kj5cyg7zrMGt7H9s';
-export const MAINNET_AO_SCHEDULER = 'n_XZJhUnmldNFo4dhajoPZWhBXuJk-OcQr5JQ49c4Zo';
+export const MAINNET_AO_SCHEDULER = AO_NODE.scheduler;
 export const MAINNET_ZONE_SOURCE = 'd4iFzJ4gxQRPHLuF13C7ncHgd-_yGGV8MtZSZmgLn7Y';
-export const MAINNET_AO_AUTHORITY = 'fcoN_xJeisVsPXA-trzVAuIiqO3ydLQxM-L4XbrQKzY';
+export const MAINNET_AO_AUTHORITY = AO_NODE.authority;
 
 type TraceEntry = {
   url: string;
