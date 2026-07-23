@@ -31,6 +31,7 @@ import { publicAsset } from '../lib/publicAsset';
 import styles from './Layout.module.css';
 
 const ARWEAVE_PERMISSIONS = ['ACCESS_ADDRESS', 'ACCESS_PUBLIC_KEY', 'SIGN_TRANSACTION', 'SIGNATURE', 'DISPATCH'];
+const ALPHA_NOTICE_STORAGE_KEY = 'streamvault:alphaNoticeAccepted:v1';
 type ConnectStage =
   | 'idle'
   | 'initializing'
@@ -131,6 +132,8 @@ export function Layout({ children }: { children: React.ReactNode }) {
   const [turboTopUpLoading, setTurboTopUpLoading] = React.useState(false);
   const [arBalance, setArBalance] = React.useState<string | null>(null);
   const [arBalanceLoading, setArBalanceLoading] = React.useState(false);
+  const [showAlphaNotice, setShowAlphaNotice] = React.useState(false);
+  const [showAlphaBar, setShowAlphaBar] = React.useState(true);
   const [isOffline, setIsOffline] = React.useState(
     () => typeof navigator !== 'undefined' && !navigator.onLine
   );
@@ -170,11 +173,46 @@ export function Layout({ children }: { children: React.ReactNode }) {
     profileRef.current = profile;
   }, [profile]);
 
+  React.useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      setShowAlphaNotice(localStorage.getItem(ALPHA_NOTICE_STORAGE_KEY) !== 'accepted');
+    } catch {
+      setShowAlphaNotice(true);
+    }
+  }, []);
+
+  const acceptAlphaNotice = React.useCallback(() => {
+    try {
+      if (typeof window !== 'undefined') {
+        localStorage.setItem(ALPHA_NOTICE_STORAGE_KEY, 'accepted');
+      }
+    } catch {
+      // Dismiss for this session even if storage is blocked.
+    }
+    setShowAlphaNotice(false);
+  }, []);
+
+  React.useEffect(() => {
+    const timer = window.setTimeout(() => setShowAlphaBar(false), 60_000);
+    return () => window.clearTimeout(timer);
+  }, []);
+
   const avatarRaw = React.useMemo(
-    () => normalizedProfile?.thumbnail || normalizedProfile?.avatar || normalizedProfile?.image || null,
+    () =>
+      normalizedProfile?.thumbnail ||
+      normalizedProfile?.Thumbnail ||
+      normalizedProfile?.avatar ||
+      normalizedProfile?.Avatar ||
+      normalizedProfile?.image ||
+      normalizedProfile?.Image ||
+      normalizedProfile?.profileImage ||
+      normalizedProfile?.ProfileImage ||
+      null,
     [normalizedProfile]
   );
-  const { src: profileAvatar, onError: onProfileAvatarError } = useArweaveMediaSources(avatarRaw);
+  const { src: profileAvatar, onError: onProfileAvatarError, onLoad: onProfileAvatarLoad } =
+    useArweaveMediaSources(avatarRaw);
 
   const profileHref = React.useMemo(() => {
     const ownedProfileId =
@@ -852,6 +890,14 @@ export function Layout({ children }: { children: React.ReactNode }) {
           You&apos;re offline — the shell may load from cache; streaming and uploads need a connection.
         </div>
       )}
+      {showAlphaBar ? (
+        <div className={styles.alphaBanner} role="status">
+          <strong>Alpha</strong>
+          <span>
+            StreamVault is experimental. Publishing to Arweave/AO can make data public and permanent.
+          </span>
+        </div>
+      ) : null}
       <header className={styles.header}>
         <div className={styles.headerInner}>
           <button
@@ -873,6 +919,19 @@ export function Layout({ children }: { children: React.ReactNode }) {
             />
             <div className={styles.logoTextGroup}>
               <span className={styles.logoText}>StreamVault</span>
+              {!showAlphaBar ? (
+                <button
+                  type="button"
+                  className={styles.alphaNavBadge}
+                  onClick={(event) => {
+                    event.preventDefault();
+                    setShowAlphaNotice(true);
+                  }}
+                  aria-label="Show alpha notice"
+                >
+                  Alpha
+                </button>
+              ) : null}
               <span className={styles.tagline}>Stream anywhere. Preserve forever.</span>
             </div>
           </Link>
@@ -887,6 +946,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
                         alt=""
                         className={styles.mobileAccountAvatar}
                         onError={onProfileAvatarError}
+                        onLoad={onProfileAvatarLoad}
                       />
                     ) : (
                       <span className={styles.mobileAccountAvatarFallback} aria-hidden>
@@ -976,6 +1036,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
                           alt=""
                           className={styles.walletAvatar}
                           onError={onProfileAvatarError}
+                        onLoad={onProfileAvatarLoad}
                         />
                       ) : (
                         <span className={styles.walletAvatarFallback} aria-hidden>
@@ -1049,6 +1110,49 @@ export function Layout({ children }: { children: React.ReactNode }) {
         onClose={() => setShowWanderConnectModal(false)}
         onUseWanderConnect={handleUseWanderConnect}
       />
+
+      {showAlphaNotice && typeof document !== 'undefined'
+        ? createPortal(
+          <div className={styles.alphaModalBackdrop} role="presentation">
+            <section
+              className={styles.alphaModal}
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="streamvault-alpha-title"
+            >
+              <button
+                type="button"
+                className={styles.alphaModalClose}
+                onClick={acceptAlphaNotice}
+                aria-label="Close alpha notice"
+              >
+                ×
+              </button>
+              <div className={styles.alphaModalEyebrow}>Alpha release</div>
+              <h2 id="streamvault-alpha-title">Use StreamVault at your own risk</h2>
+              <p>
+                StreamVault is early software for permanent music publishing, AO atomic assets,
+                UCM listings, and profile tooling. Transactions may fail, sync slowly, or require
+                manual recovery while the product is in alpha.
+              </p>
+              <p>
+                Arweave and AO are public, permanent networks. Audio, artwork, metadata, profile
+                fields, licenses, and messages you publish should be treated as public unless the
+                actual file bytes are encrypted before upload.
+              </p>
+              <p>
+                Licenses such as UDL help describe usage rights, but they do not make public data
+                private or automatically prevent copying. Only publish content you own or have the
+                rights to distribute.
+              </p>
+              <button type="button" className={styles.alphaModalButton} onClick={acceptAlphaNotice}>
+                I understand
+              </button>
+            </section>
+          </div>,
+          document.body
+        )
+        : null}
     </div>
   );
 }

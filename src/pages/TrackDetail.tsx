@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router-dom';
 import { LogoSpinner } from '../components/LogoSpinner';
 import type { Track } from '../context/PlayerContext';
 import { usePlayer } from '../context/PlayerContext';
+import { useWallet } from '../context/WalletContext';
 import { arweaveTxDataUrl, arweaveTxMetaUrl } from '../lib/arweaveDataGateway';
 import {
   artworkUrlFromTags,
@@ -22,6 +23,7 @@ import { portalHyperbeamAssetUrl } from '../lib/aoNode';
 import { findUploadLedgerByTxId } from '../lib/uploadLedger';
 import { findAtomicAssetIdForAudioTx, fetchAtomicAssetMap, fetchAtomicAssetDisplayMetadata, type AtomicAssetDisplayMetadata } from '../lib/arweaveDiscovery';
 import { uploadedTrackToPlayerTrack } from '../lib/uploadedTracks';
+import { useArweaveMediaSources } from '../hooks/useArweaveMediaSources';
 import { ListOnUcm } from '../components/ListOnUcm';
 import styles from './TrackDetail.module.css';
 
@@ -88,6 +90,7 @@ function OtherTagsTable({ tags }: { tags: ArweaveTag[] }) {
 export function TrackDetail() {
   const { txId: rawTxId } = useParams<{ txId: string }>();
   const { play, pause, currentTrack, isPlaying } = usePlayer();
+  const { address, walletType } = useWallet();
   const [data, setData] = useState<ArweaveTxExplorerData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -211,6 +214,21 @@ export function TrackDetail() {
     };
   }, [resolvedAssetId, tags, ledgerTrack?.title, ledgerTrack?.artist, ledgerTrack?.artworkTxId, ledgerTrack?.artworkUrl]);
 
+  /** Show List on UCM as soon as we have any atomic-asset id hint (do not wait for async GraphQL map). */
+  const ucmAssetId = useMemo(() => {
+    if (resolvedAssetId) return resolvedAssetId;
+    if (data?.processId) return data.processId;
+    const trackId = tags.find((t) => t.name === 'Track-Id')?.value?.trim();
+    if (trackId) return trackId;
+    const assetTag =
+      tags.find((t) => t.name === 'Asset-Id')?.value?.trim() ||
+      tags.find((t) => t.name === 'Asset-ID')?.value?.trim() ||
+      tags.find((t) => t.name === 'Atomic-Asset')?.value?.trim();
+    if (assetTag) return assetTag;
+    if (ledgerTrack?.assetId) return ledgerTrack.assetId;
+    return null;
+  }, [data?.processId, ledgerTrack?.assetId, resolvedAssetId, tags]);
+
   const title =
     sections.identity.find((r) => r.label === 'Title')?.value ||
     ledgerTrack?.title ||
@@ -233,6 +251,10 @@ export function TrackDetail() {
     artworkUrlFromTags(tags) ||
     (ledgerTrack?.artworkTxId ? arweaveTxDataUrl(ledgerTrack.artworkTxId) : ledgerTrack?.artworkUrl) ||
     assetMetadataFallback?.artworkUrl;
+
+  const { src: coverSource, onError: onCoverError, onLoad: onCoverLoad } = useArweaveMediaSources(
+    coverUrl || ''
+  );
 
   const playerTrack: Track | null = useMemo(() => {
     const streamTxId = data?.audioTxId || data?.txId;
@@ -267,6 +289,11 @@ export function TrackDetail() {
 
   const isCurrent = playerTrack && currentTrack?.id === playerTrack.id;
 
+  const showUcmListing = useMemo(() => {
+    if (!ucmAssetId || !creator || !address || walletType !== 'arweave') return false;
+    return creator.trim().toLowerCase() === address.toLowerCase();
+  }, [ucmAssetId, creator, address, walletType]);
+
   const handlePlay = () => {
     if (!playerTrack) return;
     if (isCurrent && isPlaying) pause();
@@ -300,8 +327,15 @@ export function TrackDetail() {
 
       <header className={styles.hero + ' glass'}>
         <div className={styles.coverWrap}>
-          {coverUrl ? (
-            <img src={coverUrl} alt="" className={styles.cover} loading="lazy" />
+          {coverSource ? (
+            <img
+              src={coverSource}
+              alt=""
+              className={styles.cover}
+              loading="lazy"
+              onError={onCoverError}
+              onLoad={onCoverLoad}
+            />
           ) : (
             <div className={styles.coverPlaceholder} aria-hidden="true" />
           )}
@@ -331,6 +365,7 @@ export function TrackDetail() {
           <div className={styles.badges}>
             {isAudio && <span className={styles.badge}>Audio</span>}
             {resolvedAssetId && <span className={styles.badge}>Atomic Asset</span>}
+            {ucmAssetId && !resolvedAssetId && <span className={styles.badge}>Atomic Asset</span>}
             {data.graphqlFallback && <span className={styles.badge}>GraphQL metadata</span>}
             {assetMetadataFallback && <span className={styles.badge}>HB metadata</span>}
             {data.status?.confirmed && <span className={styles.badge}>Confirmed</span>}
@@ -360,9 +395,9 @@ export function TrackDetail() {
         </div>
       </header>
 
-      {resolvedAssetId ? (
+      {showUcmListing && ucmAssetId ? (
         <section className={styles.section + ' glass'}>
-          <ListOnUcm assetId={resolvedAssetId} title={title} compact />
+          <ListOnUcm assetId={ucmAssetId} title={title} assetCreatorHint={creator} compact />
         </section>
       ) : null}
 

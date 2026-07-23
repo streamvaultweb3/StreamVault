@@ -1,0 +1,31 @@
+.pill {
+  font-size: var(--text-xs);
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--bg-glass-border);
+  color: var(--text-secondary);
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: inline-flex;
+  align-items: center;
+  line-height: 1.2;
+}
+
+.permanent {
+  color: var(--permanent);
+  background: var(--permanent-dim);
+  border-color: rgba(6, 182, 212, 0.38);
+}
+
+.atomic {
+  color: #fbbf24;
+  background: var(--atomic-dim);
+  border-color: rgba(245, 158, 11, 0.42);
+}
+
+.default {
+  color: var(--text-secondary);
+}

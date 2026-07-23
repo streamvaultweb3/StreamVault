@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
+import { useWallet } from '../context/WalletContext';
 import { lunarTxExplorerUrl } from '../lib/arweaveDataGateway';
+import { repairUcmOrderbookForAsset, type UcmListingStatus } from '../lib/ucm';
 import {
   fetchAssetUcmMarketStatus,
   resolveAssetOrderbookIdFast,
@@ -7,10 +9,12 @@ import {
 } from '../lib/ucmMarketplace';
 import { discoverUcmProcessesFromGraphql } from '../lib/ucmOrderbookDiscover';
 import {
+  getCachedAssetActivityId,
   getCachedAssetOrderbookId,
   extractOrderbookIdFromUcmMessage,
   rememberAssetOrderbookId,
   markOrderbookSpawnedForAsset,
+  wasOrderbookHbCompatPatched,
 } from '../lib/ucmOrderbookCache';
 import styles from './UcmMarketProcesses.module.css';
 
@@ -68,6 +72,7 @@ export function UcmMarketProcesses({
   orderbookIdHint,
   compact = false,
 }: UcmMarketProcessesProps) {
+  const { walletType, connect } = useWallet();
   const resolvedHint =
     String(orderbookIdHint || '').trim() ||
     getCachedAssetOrderbookId(assetId) ||
@@ -80,9 +85,13 @@ export function UcmMarketProcesses({
 
   const [status, setStatus] = useState<AssetUcmMarketStatus | null>(null);
   const [fastOrderbookId, setFastOrderbookId] = useState<string | null>(resolvedHint);
-  const [fastActivityId, setFastActivityId] = useState<string | null>(null);
+  const [fastActivityId, setFastActivityId] = useState<string | null>(() =>
+    getCachedAssetActivityId(assetId)
+  );
   const [detailLoading, setDetailLoading] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [repairing, setRepairing] = useState(false);
+  const [repairStatus, setRepairStatus] = useState<UcmListingStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -107,6 +116,8 @@ export function UcmMarketProcesses({
       ]);
       if (obId) setFastOrderbookId(obId);
       if (disc.orderbookId) setFastOrderbookId((prev) => prev || disc.orderbookId);
+      const cachedActivity = getCachedAssetActivityId(assetId);
+      if (cachedActivity) setFastActivityId(cachedActivity);
       if (disc.activityProcessId) setFastActivityId(disc.activityProcessId);
     } finally {
       setLoading(false);
@@ -140,6 +151,35 @@ export function UcmMarketProcesses({
 
   const displayOrderbookId = status?.orderbookId || fastOrderbookId;
   const displayActivityId = status?.activityProcessId || fastActivityId;
+  const repairVerified =
+    Boolean(displayOrderbookId) &&
+    Boolean(displayActivityId) &&
+    (repairStatus?.success || wasOrderbookHbCompatPatched(displayOrderbookId || ''));
+  const canRepair = Boolean(displayOrderbookId) && !repairVerified;
+
+  const handleRepair = async () => {
+    if (!displayOrderbookId || repairing) return;
+    setRepairing(true);
+    setRepairStatus(null);
+    setError(null);
+    try {
+      if (walletType !== 'arweave') {
+        const connected = await connect('arweave');
+        if (!connected) throw new Error('Connect Wander to repair this orderbook.');
+      }
+      const repaired = await repairUcmOrderbookForAsset({
+        assetId,
+        orderbookId: displayOrderbookId,
+        onStatus: setRepairStatus,
+      });
+      setFastActivityId(repaired.activityProcessId);
+      await load();
+    } catch (e: any) {
+      setError(e?.message || 'Could not repair UCM orderbook link.');
+    } finally {
+      setRepairing(false);
+    }
+  };
   const activitySyncing =
     Boolean(displayOrderbookId) &&
     !displayActivityId &&
@@ -175,6 +215,9 @@ export function UcmMarketProcesses({
       ) : null}
 
       {error ? <p className={styles.error}>{error}</p> : null}
+      {repairStatus ? (
+        <p className={repairStatus.success ? styles.success : styles.hint}>{repairStatus.message}</p>
+      ) : null}
 
       <div className={compact ? styles.processGrid : undefined}>
         <ProcessRow compact={compact} label="Orderbook" processId={displayOrderbookId} />
@@ -192,6 +235,12 @@ export function UcmMarketProcesses({
         <p className={styles.metaLine}>{statusLine}</p>
       ) : loading && !displayOrderbookId ? (
         <p className={styles.hint}>Loading…</p>
+      ) : null}
+
+      {canRepair ? (
+        <button type="button" className={styles.repairBtn} disabled={repairing} onClick={() => void handleRepair()}>
+          {repairing ? 'Repairing…' : 'Repair orderbook link'}
+        </button>
       ) : null}
 
       {!compact && status?.pairSummaries.length ? (

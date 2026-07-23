@@ -22,6 +22,9 @@
   --warning: #eab308;
   --error: #ef4444;
   --permanent: #06b6d4;
+  --permanent-dim: rgba(6, 182, 212, 0.16);
+  --atomic: #f59e0b;
+  --atomic-dim: rgba(245, 158, 11, 0.16);
 
   /* Spacing & radius */
   --radius-sm: 8px;

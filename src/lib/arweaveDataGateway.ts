@@ -11,12 +11,16 @@ export const ARWEAVE_FALLBACK_DATA_GATEWAY_BASES = ['https://arweave.net'] as co
 
 /**
  * Public data gateways for audio/artwork (path-style `/{txId}`).
- * Prefer arweave.net + Turbo — their sandbox redirects respond quickly.
- * permagate.io / ar-io.dev often 302 to sandbox hosts that hang without a VPN.
+ * Prefer arweave.net + Turbo first (matches production). Extra mirrors follow.
+ * permagate.io / ar-io.dev often redirect to sandbox hosts that hang without a VPN (kept last).
+ * Do not put arweave.nyc here.
  */
 export const ARWEAVE_PUBLIC_DATA_GATEWAY_BASES = [
   'https://arweave.net',
   'https://turbo-gateway.com',
+  'https://g8way.io',
+  'https://akrd.net',
+  'https://ardrive.net',
   'https://permagate.io',
   'https://ar-io.dev',
 ] as const;
@@ -25,7 +29,11 @@ export const ARWEAVE_PUBLIC_DATA_GATEWAY_BASES = [
 export const ARWEAVE_RELIABLE_DATA_GATEWAY_BASES = [
   'https://arweave.net',
   'https://turbo-gateway.com',
+  'https://g8way.io',
 ] as const;
+
+/** Advance to the next gateway when an `<img>` has not loaded within this window. */
+export const ARWEAVE_MEDIA_SOURCE_TIMEOUT_MS = 2_500;
 
 /** Public Turbo CDN base for optional secondary links (same id as `arweave.net/{id}` for bundled items). */
 export const TURBO_PUBLIC_DATA_GATEWAY_BASE = 'https://turbo-gateway.com';
@@ -89,9 +97,26 @@ export function arweavePublicDataUrls(txId: string): string[] {
   return ARWEAVE_PUBLIC_DATA_GATEWAY_BASES.map((base) => `${base}/${id}`);
 }
 
-/** Preferred stream URL when `arweave.net` / Turbo may be blocked without a VPN. */
+/** Preferred stream / artwork URL — arweave.net first, then Turbo mirrors. */
 export function preferredArweaveStreamUrl(txId: string): string {
-  return arweavePublicDataUrls(txId)[0] || turboTxDataUrl(txId);
+  return arweavePublicDataUrls(txId)[0] || arweaveTxDataUrl(txId);
+}
+
+/** Sandbox subdomains from gateway redirects — often 429 or hang without VPN. */
+export function isArweaveSandboxGatewayUrl(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    if (host === 'arweave.net' || host === 'turbo-gateway.com') return false;
+    return (
+      /\.arweave\.net$/i.test(host) ||
+      /\.akrd\.io$/i.test(host) ||
+      /\.ardrive\.net$/i.test(host) ||
+      /\.ar-io\.dev$/i.test(host) ||
+      /\.permagate\.io$/i.test(host)
+    );
+  } catch {
+    return false;
+  }
 }
 
 export function arweaveTxMetaUrl(txId: string): string {

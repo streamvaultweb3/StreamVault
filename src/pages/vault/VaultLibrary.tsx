@@ -4,6 +4,7 @@ import { searchTracksOnAO } from '../../lib/aoMusicRegistry';
 import {
   queryAtomicAssetsByCreator,
   queryPermanentUploadsByOwner,
+  type AtomicAssetSummary,
 } from '../../lib/arweaveDiscovery';
 import { TrackCard } from '../../components/TrackCard';
 import { UploadedTrackMeta } from '../../components/UploadedTrackMeta';
@@ -25,7 +26,9 @@ import { PublishModal } from '../../components/PublishModal';
 import { resolveProfilePublicPath } from '../../lib/permaProfile';
 import { arweaveArtistPath } from '../../lib/arweaveArtist';
 import { readUploadLedger } from '../../lib/uploadLedger';
-import { arweaveTxDataUrl } from '../../lib/arweaveDataGateway';
+import { arweaveTxDataUrl, preferredArweaveStreamUrl } from '../../lib/arweaveDataGateway';
+import { trackDetailPath } from '../../lib/arweaveTxDetail';
+import { bazarAssetUrl } from '../../lib/ucm';
 import {
   matchUploadedTrackToAudiusTrack,
   mergeAudiusTrackWithPersistedUpload,
@@ -105,30 +108,71 @@ function mergeLibraryUploads(args: {
   );
 }
 
-async function loadLibraryUploads(walletAddress: string): Promise<UploadedTrackRecord[]> {
+function atomicAssetToPlayerTrack(asset: AtomicAssetSummary): Track {
+  const audioTx = asset.audioTxId || asset.assetId;
+  const artwork = asset.artworkTxId ? preferredArweaveStreamUrl(asset.artworkTxId) : undefined;
+  return {
+    id: audioTx,
+    title: asset.title || 'Untitled',
+    artist: asset.artist || 'Unknown',
+    artistId: asset.walletAddress || asset.assetId,
+    artwork,
+    streamUrl: asset.audioTxId ? preferredArweaveStreamUrl(asset.audioTxId) : undefined,
+    isPermanent: true,
+    permaTxId: asset.audioTxId || undefined,
+    assetId: asset.assetId,
+  };
+}
+
+function atomicAssetToUploadRecord(
+  asset: AtomicAssetSummary,
+  walletAddress: string
+): UploadedTrackRecord {
+  return {
+    txId: asset.audioTxId || asset.assetId,
+    title: asset.title || 'Untitled',
+    artist: asset.artist || 'Unknown',
+    assetId: asset.assetId,
+    artworkTxId: asset.artworkTxId,
+    walletAddress: asset.walletAddress || walletAddress,
+    createdAt: asset.createdAt || new Date(0).toISOString(),
+    permawebUrl: asset.audioTxId ? arweaveTxDataUrl(asset.audioTxId) : undefined,
+  };
+}
+
+async function loadLibraryData(walletAddress: string): Promise<{
+  uploads: UploadedTrackRecord[];
+  atomicAssets: AtomicAssetSummary[];
+}> {
   const ledgerRows = readUploadLedger([walletAddress])
     .map((row) => normalizeUploadedTrackRecord(row))
     .filter(Boolean) as UploadedTrackRecord[];
 
   const [chainUploads, atomicAssets, aoRecords] = await Promise.all([
     queryPermanentUploadsByOwner(walletAddress, 50).catch(() => [] as UploadedTrackRecord[]),
-    queryAtomicAssetsByCreator(walletAddress, 50).catch(() => []),
+    queryAtomicAssetsByCreator(walletAddress, 50).catch(() => [] as AtomicAssetSummary[]),
     searchTracksOnAO({ creator: walletAddress }).catch(() => []),
   ]);
 
-  return mergeLibraryUploads({
-    walletAddress,
-    ledgerRows,
-    chainUploads,
+  return {
+    uploads: mergeLibraryUploads({
+      walletAddress,
+      ledgerRows,
+      chainUploads,
+      atomicAssets,
+      aoRecords,
+    }),
     atomicAssets,
-    aoRecords,
-  });
+  };
 }
+
+type LibraryTab = 'atomic' | 'tracks' | 'audius';
 
 export function VaultLibrary() {
   const { address } = useWallet();
   const { audiusUser, login, apiKeyConfigured, isLoggingIn, authError } = useAudiusAuth();
   const [libraryUploads, setLibraryUploads] = useState<UploadedTrackRecord[]>([]);
+  const [atomicAssets, setAtomicAssets] = useState<AtomicAssetSummary[]>([]);
   const [audiusTracks, setAudiusTracks] = useState<Track[]>([]);
   const [audiusPlaylists, setAudiusPlaylists] = useState<AudiusPlaylist[]>([]);
   const [audiusAlbums, setAudiusAlbums] = useState<AudiusAlbum[]>([]);
@@ -137,7 +181,7 @@ export function VaultLibrary() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [publishTrack, setPublishTrack] = useState<Track | null>(null);
-  const [activeTab, setActiveTab] = useState<'tracks' | 'audius'>('tracks');
+  const [activeTab, setActiveTab] = useState<LibraryTab>('atomic');
   const lastAutoOpenedAudiusHandleRef = useRef<string | null>(null);
 
   const profileHref = useMemo(() => {
@@ -171,6 +215,7 @@ export function VaultLibrary() {
   useEffect(() => {
     if (!address) {
       setLibraryUploads([]);
+      setAtomicAssets([]);
       setLoading(false);
       return;
     }
@@ -180,13 +225,17 @@ export function VaultLibrary() {
     const reload = () => {
       setLoading(true);
       setError(null);
-      void loadLibraryUploads(address)
-        .then((rows) => {
-          if (!cancelled) setLibraryUploads(rows);
+      void loadLibraryData(address)
+        .then((data) => {
+          if (!cancelled) {
+            setLibraryUploads(data.uploads);
+            setAtomicAssets(data.atomicAssets);
+          }
         })
         .catch((e: unknown) => {
           if (!cancelled) {
             setLibraryUploads([]);
+            setAtomicAssets([]);
             setError((e as { message?: string })?.message ?? 'Failed to load library.');
           }
         })
@@ -273,6 +322,13 @@ export function VaultLibrary() {
         </Link>.
       </p>
       <div className={styles.tabRow}>
+        <button
+          type="button"
+          className={activeTab === 'atomic' ? `${styles.tab} ${styles.tabActive}` : styles.tab}
+          onClick={() => setActiveTab('atomic')}
+        >
+          Atomic Assets
+        </button>
         <button
           type="button"
           className={activeTab === 'tracks' ? `${styles.tab} ${styles.tabActive}` : styles.tab}
@@ -374,8 +430,7 @@ export function VaultLibrary() {
                           footerContent={
                             matchedUpload ? (
                               <>
-                                <span className={styles.sourcePill}>Arweave</span>
-                                <UploadedTrackMeta track={matchedUpload} compact />
+                                <UploadedTrackMeta track={matchedUpload} compact sourceLabel="Arweave" />
                               </>
                             ) : (
                               <span className={styles.uploadHint}>Not uploaded to Arweave yet.</span>
@@ -397,9 +452,54 @@ export function VaultLibrary() {
         </>
       ) : !address ? (
         <p className={styles.placeholderBox}>Connect your wallet to see your on-chain library.</p>
+      ) : activeTab === 'atomic' ? (
+        <>
+          <p className={styles.sectionSubtitle} style={{ marginTop: 0 }}>
+            Atomic assets you created (AO process spawns owned by your wallet).
+          </p>
+          {error && <p className={styles.errorText}>{error}</p>}
+          {loading ? (
+            <p className={styles.loading}>Loading…</p>
+          ) : (
+            <section className={styles.grid}>
+              {atomicAssets.map((asset) => {
+                const detailTx = asset.audioTxId || asset.assetId;
+                const uploadRecord = atomicAssetToUploadRecord(asset, address);
+                return (
+                  <TrackCard
+                    key={asset.assetId}
+                    track={atomicAssetToPlayerTrack(asset)}
+                    artistHref={arweaveArtistPath(address)}
+                    titleHref={trackDetailPath(detailTx)}
+                        showPermanentBadge={false}
+                    footerContent={
+                      <>
+                        <UploadedTrackMeta track={uploadRecord} compact />
+                        <a
+                          className={styles.uploadHint}
+                          href={bazarAssetUrl(asset.assetId)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          style={{ color: 'var(--accent)', textDecoration: 'underline' }}
+                        >
+                          Bazar
+                        </a>
+                      </>
+                    }
+                  />
+                );
+              })}
+            </section>
+          )}
+          {!loading && !error && atomicAssets.length === 0 && (
+            <p className={styles.placeholderBox}>
+              No atomic assets found for this wallet yet. Publish a full track from Upload to mint one.
+            </p>
+          )}
+        </>
       ) : (
         <>
-          {activeTab === 'tracks' && audiusUser && (
+          {audiusUser && (
             <div className={styles.walletCard} style={{ marginBottom: '16px', maxWidth: '100%' }}>
               <p className={styles.sectionSubtitle} style={{ marginBottom: '8px' }}>
                 Audius connected as @{audiusUser.handle}
@@ -429,8 +529,7 @@ export function VaultLibrary() {
                   showPermanentBadge={false}
                   footerContent={
                     <>
-                      <span className={styles.sourcePill}>Arweave</span>
-                      <UploadedTrackMeta track={track} compact />
+                      <UploadedTrackMeta track={track} compact sourceLabel="Arweave" />
                     </>
                   }
                 />

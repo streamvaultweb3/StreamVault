@@ -7,7 +7,7 @@ import { fetchHyperbeamAssetState } from './hbNode';
 import {
   UCM_LEGACY_ORDERBOOK_ID,
   buildUcmDeps,
-  resolveAssetListingIdentity,
+  fetchSellerAssetBalance,
   resolveAssetOrderbookId,
 } from './ucm';
 import {
@@ -27,10 +27,12 @@ import {
 import { resolveCanonicalAtomicAssetId } from './ucmAssetResolve';
 import {
   getCachedAssetActivityId,
+  getCachedAssetListingAttempt,
   getCachedAssetOrderbookId,
   rememberAssetActivityId,
   rememberAssetOrderbookId,
 } from './ucmOrderbookCache';
+import { DEFAULT_WAR_TOKEN_ID, getUcmQuoteToken, tokenBaseUnitsToDisplay } from './ucmTokens';
 
 export type UcmActiveOrder = {
   orderId: string;
@@ -45,6 +47,8 @@ export type UcmActiveOrder = {
   priceAr: string;
   creator: string;
   side: 'Ask' | 'Bid';
+  /** True when asset Balances show orderbook escrow but Orderbook Info has no ask yet. */
+  escrowedUnread?: boolean;
 };
 
 export type MarketplaceListing = {
@@ -62,6 +66,7 @@ export type MarketplaceListing = {
   orderId: string;
   orderbookId: string;
   track: Track;
+  escrowedUnread?: boolean;
 };
 
 function toUcmActiveOrder(ask: ParsedUcmAsk): UcmActiveOrder {
@@ -77,6 +82,61 @@ function toUcmActiveOrder(ask: ParsedUcmAsk): UcmActiveOrder {
     priceAr: ask.priceDisplay,
     creator: ask.creator,
     side: ask.side,
+  };
+}
+
+export function isEscrowedUnreadOrderId(orderId: string): boolean {
+  return String(orderId || '').startsWith('escrow:');
+}
+
+function parseOrderbookEscrowQty(
+  balances: unknown,
+  orderbookId: string
+): number {
+  const book = String(orderbookId || '').trim();
+  if (!book || balances == null) return 0;
+  if (typeof balances === 'object' && !Array.isArray(balances)) {
+    const raw = (balances as Record<string, unknown>)[book];
+    const n = Number(raw ?? 0);
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+  }
+  return 0;
+}
+
+async function readOrderbookEscrowQty(assetId: string, orderbookId: string): Promise<number> {
+  const hb = await fetchHyperbeamAssetState(assetId).catch(() => null);
+  const json = (hb?.json || null) as Record<string, unknown> | null;
+  return parseOrderbookEscrowQty(json?.Balances, orderbookId);
+}
+
+function buildEscrowedUnreadOrder(args: {
+  assetId: string;
+  orderbookId: string;
+  quantity: number;
+  creator: string;
+}): UcmActiveOrder {
+  const cached = getCachedAssetListingAttempt(args.assetId);
+  const quoteToken =
+    String(cached?.quoteTokenId || '').trim() || DEFAULT_WAR_TOKEN_ID;
+  const tokenMeta = getUcmQuoteToken(quoteToken);
+  const priceDisplay = String(cached?.priceDisplay || '').trim()
+    ? String(cached?.priceDisplay).trim()
+    : cached?.priceWinston
+      ? tokenBaseUnitsToDisplay(cached.priceWinston, tokenMeta?.denomination ?? 12)
+      : '—';
+  return {
+    orderId: `escrow:${args.orderbookId}`,
+    orderbookId: args.orderbookId,
+    assetId: args.assetId,
+    quoteToken,
+    quoteSymbol: String(cached?.quoteSymbol || tokenMeta?.symbol || 'TOKEN'),
+    quantity: String(Math.max(1, Math.floor(args.quantity))),
+    priceWinston: String(cached?.priceWinston || '0'),
+    priceDisplay,
+    priceAr: priceDisplay,
+    creator: args.creator,
+    side: 'Ask',
+    escrowedUnread: true,
   };
 }
 
@@ -361,6 +421,7 @@ export async function fetchAssetUcmAsks(
 export type WalletListingsResult = {
   orders: UcmActiveOrder[];
   timedOut?: boolean;
+  orderbookReachable?: boolean;
 };
 
 export async function fetchWalletListingsForAsset(args: {
@@ -369,6 +430,8 @@ export async function fetchWalletListingsForAsset(args: {
   profileId?: string | null;
   quoteTokenId?: string | null;
   orderbookIdHint?: string | null;
+  /** Owner listing UI can surface escrowed transfers; public/profile marketplace views should not. */
+  includeEscrowedUnread?: boolean;
 }): Promise<WalletListingsResult> {
   const wallet = args.walletAddress.trim();
   if (!wallet) return { orders: [] };
@@ -376,25 +439,66 @@ export async function fetchWalletListingsForAsset(args: {
   const hintedOrderbookId =
     String(args.orderbookIdHint || '').trim() ||
     getCachedAssetOrderbookId(args.assetId) ||
+    getCachedAssetListingAttempt(args.assetId)?.orderbookId ||
     null;
 
   return withTimeout(
     (async (): Promise<WalletListingsResult> => {
       const canonicalAssetId = await resolveCanonicalAtomicAssetId(args.assetId);
-      const listingIdentity = await resolveAssetListingIdentity({
-        assetId: canonicalAssetId,
-        walletAddress: wallet,
-        profileId: args.profileId,
-      });
-      const creators = new Set(listingIdentity.askCreatorIds);
+      // Prefer wallet + profile ids — skip slow Balances identity resolve for Refresh.
+      const creators = new Set(
+        [wallet, String(args.profileId || '').trim()].filter(Boolean)
+      );
       const quoteFilter = String(args.quoteTokenId || '').trim();
       const asks = await fetchAssetUcmAsks(canonicalAssetId, hintedOrderbookId);
       const orders = asks.filter((order) => {
-        if (!creators.has(order.creator) || order.side !== 'Ask') return false;
+        if (order.side !== 'Ask') return false;
+        // Dedicated micro-orderbooks are per-asset; still prefer seller match when Creator is set.
+        if (order.creator && creators.size > 0 && !creators.has(order.creator)) return false;
         if (quoteFilter && order.quoteToken !== quoteFilter) return false;
         return true;
       });
-      return { orders };
+
+      if (orders.length > 0) {
+        return { orders, orderbookReachable: true };
+      }
+
+      const orderbookId =
+        hintedOrderbookId ||
+        (await resolveAssetOrderbookIdFast(canonicalAssetId)) ||
+        null;
+      if (!orderbookId) return { orders: [], orderbookReachable: false };
+      if (args.includeEscrowedUnread === false) {
+        return { orders: [], orderbookReachable: true };
+      }
+
+      const [escrowQty, sellerBal] = await Promise.all([
+        readOrderbookEscrowQty(canonicalAssetId, orderbookId),
+        fetchSellerAssetBalance({
+          assetId: canonicalAssetId,
+          walletAddress: wallet,
+          profileId: args.profileId,
+        }).catch(() => null),
+      ]);
+      const escrowed =
+        escrowQty > 0
+          ? escrowQty
+          : Math.max(0, Math.floor(sellerBal?.escrowedCopies || 0));
+      if (escrowed <= 0) {
+        return { orders: [], orderbookReachable: true };
+      }
+
+      return {
+        orders: [
+          buildEscrowedUnreadOrder({
+            assetId: canonicalAssetId,
+            orderbookId,
+            quantity: escrowed,
+            creator: wallet,
+          }),
+        ],
+        orderbookReachable: true,
+      };
     })(),
     WALLET_LISTINGS_TIMEOUT_MS,
     { orders: [], timedOut: true }
@@ -418,6 +522,25 @@ async function mapWithConcurrency<T, R>(
   return out;
 }
 
+function listingFromAsk(track: Track, ask: UcmActiveOrder): MarketplaceListing {
+  return {
+    assetId: ask.assetId,
+    audioTxId: track.permaTxId || track.id,
+    title: track.title,
+    artist: track.artist,
+    artworkUrl: track.artwork,
+    priceDisplay: ask.priceDisplay,
+    priceAr: ask.priceDisplay,
+    quoteSymbol: ask.quoteSymbol,
+    priceWinston: ask.priceWinston,
+    quantity: ask.quantity,
+    orderId: ask.orderId,
+    orderbookId: ask.orderbookId,
+    track,
+    escrowedUnread: ask.escrowedUnread,
+  };
+}
+
 /** Discover StreamVault atomic assets with active UCM sell orders. */
 export async function fetchStreamVaultMarketplaceListings(limit = 16): Promise<MarketplaceListing[]> {
   const assetMap = await fetchAtomicAssetMap({ limit: 100 });
@@ -439,25 +562,43 @@ export async function fetchStreamVaultMarketplaceListings(limit = 16): Promise<M
     const asks = extractAssetUcmAsksFromInfo(info, assetId, routing.orderbookId);
     for (const ask of asks) {
       if (Number(ask.quantity) <= 0) continue;
-      listingByOrderId.set(ask.orderId, {
-        assetId,
-        audioTxId: track.permaTxId || track.id,
-        title: track.title,
-        artist: track.artist,
-        artworkUrl: track.artwork,
-        priceDisplay: ask.priceDisplay,
-        priceAr: ask.priceDisplay,
-        quoteSymbol: ask.quoteSymbol,
-        priceWinston: ask.priceWinston,
-        quantity: ask.quantity,
-        orderId: ask.orderId,
-        orderbookId: ask.orderbookId,
-        track,
-      });
+      listingByOrderId.set(ask.orderId, listingFromAsk(track, ask));
     }
   });
 
   return Array.from(listingByOrderId.values())
+    .sort((a, b) => Number(b.priceWinston) - Number(a.priceWinston))
+    .slice(0, limit);
+}
+
+/** Profile / vault: assets with active readable UCM asks for a set of known atomic asset ids. */
+export async function fetchListedAssetsForProfile(args: {
+  assets: Array<{ assetId: string; track: Track }>;
+  walletAddress: string;
+  profileId?: string | null;
+  limit?: number;
+}): Promise<MarketplaceListing[]> {
+  const wallet = String(args.walletAddress || '').trim();
+  if (!wallet || !args.assets.length) return [];
+  const limit = Math.max(1, args.limit ?? 24);
+  const listingByKey = new Map<string, MarketplaceListing>();
+
+  await mapWithConcurrency(args.assets.slice(0, 40), 4, async (row) => {
+    const assetId = String(row.assetId || '').trim();
+    if (!assetId) return;
+    const { orders } = await fetchWalletListingsForAsset({
+      assetId,
+      walletAddress: wallet,
+      profileId: args.profileId,
+      orderbookIdHint: getCachedAssetOrderbookId(assetId),
+      includeEscrowedUnread: false,
+    });
+    for (const order of orders) {
+      listingByKey.set(order.orderId, listingFromAsk(row.track, order));
+    }
+  });
+
+  return Array.from(listingByKey.values())
     .sort((a, b) => Number(b.priceWinston) - Number(a.priceWinston))
     .slice(0, limit);
 }

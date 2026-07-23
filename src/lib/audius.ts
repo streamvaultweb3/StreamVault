@@ -148,60 +148,243 @@ export async function getPlaylistTracks(playlistId: string, limit = 20): Promise
 /** Prefer signed stream URL from payload; fallback to API stream endpoint. */
 export function getStreamUrl(track: AudiusTrack): string {
   if (track.stream?.url) return track.stream.url;
-  return `${AUDIUS_API}/tracks/${track.id}/stream?app_name=${encodeURIComponent(APP_NAME)}`;
+  return audiusApiStreamUrl(track.id);
 }
 
-/**
- * Download the full Audius stream into a Blob (browser).
- * Requires the stream URL to allow CORS from your app origin (Audius CDN usually does).
- */
-export async function fetchAudiusStreamAsBlob(
-  streamUrl: string,
-  opts?: { maxBytes?: number }
-): Promise<Blob> {
-  const maxBytes = opts?.maxBytes ?? 10 * 1024 * 1024;
-  const res = await fetch(streamUrl, { mode: 'cors', credentials: 'omit' });
-  if (!res.ok) {
-    throw new Error(
-      `Could not fetch stream (${res.status}). Upload a file from disk, or try again later if the network blocked the request.`
+/** Audius API stream endpoint — redirects to a fresh signed CDN URL on each request. */
+export function audiusApiStreamUrl(trackId: string): string {
+  return `${AUDIUS_API}/tracks/${encodeURIComponent(trackId)}/stream?app_name=${encodeURIComponent(APP_NAME)}`;
+}
+
+export type AudiusStreamFetchErrorKind =
+  | 'network'
+  | 'cors'
+  | 'http'
+  | 'not-audio'
+  | 'empty'
+  | 'too-large';
+
+export class AudiusStreamFetchError extends Error {
+  readonly kind: AudiusStreamFetchErrorKind;
+  readonly status?: number;
+
+  constructor(kind: AudiusStreamFetchErrorKind, message: string, status?: number) {
+    super(message);
+    this.name = 'AudiusStreamFetchError';
+    this.kind = kind;
+    this.status = status;
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isBrowserNetworkError(err: unknown): boolean {
+  const msg = String((err as { message?: string })?.message || err || '');
+  return /Failed to fetch|NetworkError|Load failed|network|ECONNRESET|ETIMEDOUT|aborted|AbortError/i.test(
+    msg
+  );
+}
+
+function isRetryableHttpStatus(status: number): boolean {
+  return status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
+function shouldTryNextUrl(err: unknown): boolean {
+  if (err instanceof AudiusStreamFetchError) {
+    if (err.kind === 'too-large' || err.kind === 'not-audio' || err.kind === 'empty') return false;
+    if (err.kind === 'http' && err.status != null) {
+      return err.status === 401 || err.status === 403 || err.status === 404 || isRetryableHttpStatus(err.status);
+    }
+    return err.kind === 'network' || err.kind === 'cors' || err.kind === 'http';
+  }
+  return isBrowserNetworkError(err);
+}
+
+function shouldRetrySameUrl(err: unknown): boolean {
+  if (err instanceof AudiusStreamFetchError) {
+    if (err.kind === 'network' || err.kind === 'cors') return true;
+    if (err.kind === 'http' && err.status != null) return isRetryableHttpStatus(err.status);
+    return false;
+  }
+  return isBrowserNetworkError(err);
+}
+
+/** Ordered stream URL candidates: fresh API payload, API redirect endpoint, then cached URL. */
+export async function resolveAudiusStreamUrlCandidates(
+  trackId: string,
+  cachedUrl?: string
+): Promise<string[]> {
+  const urls: string[] = [];
+  const push = (url?: string | null) => {
+    const value = String(url || '').trim();
+    if (value && !urls.includes(value)) urls.push(value);
+  };
+
+  try {
+    const track = await getTrackById(trackId);
+    if (track) push(getStreamUrl(track));
+  } catch {
+    // Continue with API redirect + cached URL.
+  }
+
+  push(audiusApiStreamUrl(trackId));
+  push(cachedUrl);
+  return urls;
+}
+
+async function downloadAudiusStreamFromUrl(url: string, maxBytes: number): Promise<Blob> {
+  let res: Response;
+  try {
+    res = await fetch(url, { mode: 'cors', credentials: 'omit', cache: 'no-store', redirect: 'follow' });
+  } catch (err) {
+    throw new AudiusStreamFetchError(
+      isBrowserNetworkError(err) ? 'cors' : 'network',
+      isBrowserNetworkError(err)
+        ? 'Browser blocked the Audius stream request (network or CORS). Upload the audio file from disk, or retry after refreshing the page.'
+        : 'Network error while downloading the Audius stream. Check your connection or VPN, then retry.',
+      undefined
     );
   }
-  const contentType = res.headers.get('content-type') || 'audio/mpeg';
-  if (!contentType.startsWith('audio/')) {
-    throw new Error('Stream URL did not return audio. Upload the file manually.');
+
+  if (!res.ok) {
+    const status = res.status;
+    let message = `Audius stream returned HTTP ${status}.`;
+    if (status === 401 || status === 403) {
+      message =
+        'Audius denied access to the stream URL (likely an expired signed link). Refresh the page and retry, or upload the audio file from disk.';
+    } else if (status === 404) {
+      message = 'Audius stream was not found. The track may have been removed; upload the audio file from disk instead.';
+    } else if (status === 429) {
+      message = 'Audius rate-limited the stream request. Wait a moment and retry, or upload the audio file from disk.';
+    } else if (status >= 500) {
+      message = `Audius CDN error (${status}). Retry in a moment or upload the audio file from disk.`;
+    } else {
+      message += ' Upload the audio file from disk, or retry later.';
+    }
+    throw new AudiusStreamFetchError('http', message, status);
   }
+
+  const contentType = (res.headers.get('content-type') || 'audio/mpeg').split(';')[0].trim();
+  if (!contentType.startsWith('audio/')) {
+    throw new AudiusStreamFetchError(
+      'not-audio',
+      `Stream URL returned ${contentType || 'non-audio'} instead of audio. Upload the file manually.`
+    );
+  }
+
   const lenHeader = res.headers.get('content-length');
   if (lenHeader) {
     const total = Number(lenHeader);
     if (Number.isFinite(total) && total > maxBytes) {
-      throw new Error(
+      throw new AudiusStreamFetchError(
+        'too-large',
         `Track is larger than ${Math.round(maxBytes / (1024 * 1024))}MB. Enable Turbo for larger uploads or use a shorter file.`
       );
     }
+    if (Number.isFinite(total) && total <= 0) {
+      throw new AudiusStreamFetchError('empty', 'Audius stream response was empty. Retry or upload the audio file from disk.');
+    }
   }
+
   const reader = res.body?.getReader();
   if (!reader) {
     const buf = await res.arrayBuffer();
+    if (buf.byteLength <= 0) {
+      throw new AudiusStreamFetchError('empty', 'Audius stream response was empty. Retry or upload the audio file from disk.');
+    }
     if (buf.byteLength > maxBytes) {
-      throw new Error(`Track exceeds ${Math.round(maxBytes / (1024 * 1024))}MB limit.`);
+      throw new AudiusStreamFetchError(
+        'too-large',
+        `Track exceeds ${Math.round(maxBytes / (1024 * 1024))}MB limit.`
+      );
     }
     return new Blob([buf], { type: contentType });
   }
+
   const chunks: Uint8Array[] = [];
   let received = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (value) {
-      if (received + value.byteLength > maxBytes) {
-        await reader.cancel().catch(() => {});
-        throw new Error(`Track exceeds ${Math.round(maxBytes / (1024 * 1024))}MB limit.`);
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        if (received + value.byteLength > maxBytes) {
+          await reader.cancel().catch(() => {});
+          throw new AudiusStreamFetchError(
+            'too-large',
+            `Track exceeds ${Math.round(maxBytes / (1024 * 1024))}MB limit.`
+          );
+        }
+        chunks.push(value);
+        received += value.byteLength;
       }
-      chunks.push(value);
-      received += value.byteLength;
+    }
+  } catch (err) {
+    if (err instanceof AudiusStreamFetchError) throw err;
+    throw new AudiusStreamFetchError(
+      'network',
+      'Download interrupted before the full track was received. Retry or upload the audio file from disk.'
+    );
+  }
+
+  if (received <= 0) {
+    throw new AudiusStreamFetchError('empty', 'Audius stream response was empty. Retry or upload the audio file from disk.');
+  }
+
+  return new Blob(chunks as BlobPart[], { type: contentType });
+}
+
+const STREAM_RETRY_DELAYS_MS = [600, 1500, 3000];
+
+/**
+ * Download the full Audius stream into a Blob (browser).
+ * Refreshes signed CDN URLs from the Audius API when `audiusTrackId` is provided.
+ */
+export async function fetchAudiusStreamAsBlob(
+  streamUrl: string,
+  opts?: { maxBytes?: number; audiusTrackId?: string }
+): Promise<Blob> {
+  const maxBytes = opts?.maxBytes ?? 10 * 1024 * 1024;
+  const candidates =
+    opts?.audiusTrackId != null && String(opts.audiusTrackId).trim()
+      ? await resolveAudiusStreamUrlCandidates(String(opts.audiusTrackId).trim(), streamUrl)
+      : [streamUrl].filter(Boolean);
+
+  if (candidates.length === 0) {
+    throw new AudiusStreamFetchError(
+      'network',
+      'No Audius stream URL available. Upload the audio file from disk instead.'
+    );
+  }
+
+  let lastError: unknown;
+  for (let urlIndex = 0; urlIndex < candidates.length; urlIndex += 1) {
+    const url = candidates[urlIndex];
+    const maxAttempts = urlIndex === 0 ? STREAM_RETRY_DELAYS_MS.length + 1 : 2;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      try {
+        return await downloadAudiusStreamFromUrl(url, maxBytes);
+      } catch (err) {
+        lastError = err;
+        const retrySame = shouldRetrySameUrl(err) && attempt < maxAttempts - 1;
+        if (retrySame) {
+          await sleep(STREAM_RETRY_DELAYS_MS[Math.min(attempt, STREAM_RETRY_DELAYS_MS.length - 1)]);
+          continue;
+        }
+        if (shouldTryNextUrl(err) && urlIndex < candidates.length - 1) break;
+        throw err;
+      }
     }
   }
-  return new Blob(chunks as BlobPart[], { type: contentType });
+
+  if (lastError instanceof AudiusStreamFetchError) throw lastError;
+  if (lastError instanceof Error) throw lastError;
+  throw new AudiusStreamFetchError(
+    'network',
+    'Could not download the full track from the Audius stream. Upload the audio file from disk instead, or retry later.'
+  );
 }
 
 type SizedImage = { '150x150'?: string; '480x480'?: string; '1000x1000'?: string };

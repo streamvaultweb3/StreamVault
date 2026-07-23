@@ -45,6 +45,11 @@ export interface PublishResult {
   gatewayReady?: boolean;
   /** If artwork was uploaded as a separate tx, this links the audio to it. */
   artworkTxId?: string;
+  /**
+   * Audio uploaded but AO process id not returned yet (HyperBEAM spawn lag).
+   * UI should treat as success with pending atomic mint, not a hard failure.
+   */
+  mintPending?: boolean;
   error?: string;
 }
 

@@ -533,9 +533,11 @@ export function resolveProfileMediaUrl(raw: any): string | null {
   if (value.startsWith('data:')) return value;
   if (value.startsWith('http://') || value.startsWith('https://')) {
     const fromUrl = value.match(/\/([A-Za-z0-9_-]{43})(?:$|[?#/])/);
-    if (fromUrl?.[1] && /:\/\/(?:[^/]+\.)?(?:arweave\.net|arweave\.dev|g8way\.io|ar-io\.dev|permagate\.io|turbo-gateway\.com)\//i.test(value)) {
-      return resolveProfileMediaUrls(fromUrl[1])[0] || value;
+    if (fromUrl?.[1] && /:\/\/(?:[^/]+\.)?(?:arweave\.net|arweave\.dev|g8way\.io|ar-io\.dev|permagate\.io|turbo-gateway\.com|akrd\.net|ardrive\.net)\//i.test(value)) {
+      return resolveProfileMediaUrls(fromUrl[1])[0] || preferredArweaveStreamUrl(fromUrl[1]);
     }
+    // Unknown https host — if it embeds a tx id, still prefer public gateway URLs (arweave.net first).
+    if (fromUrl?.[1]) return preferredArweaveStreamUrl(fromUrl[1]);
     return value;
   }
   const id = value.startsWith('ar://') ? value.slice(5) : value;
@@ -556,7 +558,7 @@ export function resolveProfileMediaUrls(raw: any): string[] {
   if (value.startsWith('data:')) return [value];
   if (value.startsWith('http://') || value.startsWith('https://')) {
     const fromUrl = value.match(/\/([A-Za-z0-9_-]{43})(?:$|[?#/])/);
-    if (fromUrl?.[1] && /:\/\/(?:[^/]+\.)?(?:arweave\.net|arweave\.dev|g8way\.io|ar-io\.dev|permagate\.io|turbo-gateway\.com)\//i.test(value)) {
+    if (fromUrl?.[1] && /:\/\/(?:[^/]+\.)?(?:arweave\.net|arweave\.dev|g8way\.io|ar-io\.dev|permagate\.io|turbo-gateway\.com|akrd\.net|ardrive\.net)\//i.test(value)) {
       return resolveProfileMediaUrls(fromUrl[1]);
     }
     return [value];

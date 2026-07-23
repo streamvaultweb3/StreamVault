@@ -1,13 +1,14 @@
 /**
  * Resilient Arweave data URL resolution without probing the full AR.IO peer network.
  *
- * Uses path-style Range probes on a small curated gateway list (arweave.net, turbo-gateway.com)
- * instead of @ar.io/wayfinder-core FastestPing, which HEAD-pings every trusted peer and floods
- * the console/network when many artworks load at once.
+ * Uses path-style Range probes on a small curated gateway list instead of @ar.io/wayfinder-core
+ * FastestPing, which HEAD-pings every trusted peer and floods the console/network when many
+ * artworks load at once.
  */
 import {
   ARWEAVE_PUBLIC_DATA_GATEWAY_BASES,
   ARWEAVE_RELIABLE_DATA_GATEWAY_BASES,
+  isArweaveSandboxGatewayUrl,
   normalizeArweaveTxId,
   preferredArweaveStreamUrl,
 } from './arweaveDataGateway';
@@ -20,7 +21,10 @@ const resolveInflight = new Map<string, Promise<string[]>>();
 
 /** Sandbox / path URLs on hosts that often hang after redirect without a VPN. */
 function isUnreliableGatewayUrl(url: string): boolean {
-  return /(?:^|\/\/)(?:[^/]*\.)?(?:ar-io\.dev|permagate\.io)(?:[:/]|$)/i.test(url);
+  return (
+    isArweaveSandboxGatewayUrl(url) ||
+    /(?:^|\/\/)(?:[^/]*\.)?(?:ar-io\.dev|permagate\.io)(?:[:/]|$)/i.test(url)
+  );
 }
 
 function demoteUnreliableGatewayUrls(urls: string[]): string[] {
@@ -37,6 +41,7 @@ function demoteUnreliableGatewayUrls(urls: string[]): string[] {
 }
 
 function cacheResolvedUrl(txId: string, url: string) {
+  if (isUnreliableGatewayUrl(url)) return;
   resolveCache.set(txId, { url, expiresAt: Date.now() + RESOLVE_CACHE_TTL_MS });
 }
 
@@ -47,11 +52,29 @@ function readCachedUrl(txId: string): string | null {
     resolveCache.delete(txId);
     return null;
   }
+  if (isUnreliableGatewayUrl(hit.url)) {
+    resolveCache.delete(txId);
+    return null;
+  }
   return hit.url;
 }
 
+function pathStyleDataUrl(base: string, txId: string): string {
+  return `${base.replace(/\/+$/, '')}/${txId}`;
+}
+
+function appendPublicGatewayUrls(txId: string, urls: string[]): string[] {
+  const merged = [...urls];
+  for (const base of ARWEAVE_PUBLIC_DATA_GATEWAY_BASES) {
+    const url = pathStyleDataUrl(base, txId);
+    if (!merged.includes(url)) merged.push(url);
+  }
+  return demoteUnreliableGatewayUrls(merged);
+}
+
 /**
- * Path-style FastestPing: Range-GET `/{txId}` on each curated gateway (no AR.IO sandbox subdomain).
+ * Path-style probe: Range-GET `/{txId}` on curated gateways.
+ * Never follows redirects to sandbox subdomains — always keeps path-style on the curated base.
  */
 async function resolvePathStyleFastest(txId: string): Promise<string | null> {
   const id = normalizeArweaveTxId(txId);
@@ -62,15 +85,21 @@ async function resolvePathStyleFastest(txId: string): Promise<string | null> {
     let settled = false;
 
     for (const base of ARWEAVE_RELIABLE_DATA_GATEWAY_BASES) {
-      const url = `${base}/${id}`;
+      const url = pathStyleDataUrl(base, id);
       void fetch(url, {
         method: 'GET',
         headers: { Range: 'bytes=0-0' },
-        redirect: 'follow',
+        redirect: 'manual',
         signal: AbortSignal.timeout(PATH_STYLE_PING_TIMEOUT_MS),
       })
         .then((response) => {
-          if (!settled && (response.ok || response.status === 206)) {
+          if (
+            !settled &&
+            (response.ok ||
+              response.status === 206 ||
+              response.status === 302 ||
+              response.status === 307)
+          ) {
             settled = true;
             resolve(url);
           }
@@ -102,12 +131,7 @@ async function resolveWayfinderDataUrlsInternal(txId: string): Promise<string[]>
     urls.push(preferredArweaveStreamUrl(id));
   }
 
-  for (const base of ARWEAVE_PUBLIC_DATA_GATEWAY_BASES) {
-    const url = `${base}/${id}`;
-    if (!urls.includes(url)) urls.push(url);
-  }
-
-  return demoteUnreliableGatewayUrls(urls);
+  return appendPublicGatewayUrls(id, urls);
 }
 
 /**
@@ -128,12 +152,7 @@ export async function resolveWayfinderDataUrls(txId: string): Promise<string[]> 
 
   const cached = readCachedUrl(id);
   if (cached) {
-    const urls = [cached];
-    for (const base of ARWEAVE_PUBLIC_DATA_GATEWAY_BASES) {
-      const url = `${base}/${id}`;
-      if (!urls.includes(url)) urls.push(url);
-    }
-    return demoteUnreliableGatewayUrls(urls);
+    return appendPublicGatewayUrls(id, [cached]);
   }
 
   const inflight = resolveInflight.get(id);

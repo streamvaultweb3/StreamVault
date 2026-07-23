@@ -6,6 +6,7 @@ import { useAudiusAuth } from '../context/AudiusAuthContext';
 import type { Track } from '../context/PlayerContext';
 import { TrackCard } from '../components/TrackCard';
 import { LogoSpinner } from '../components/LogoSpinner';
+import { SourcePill } from '../components/SourcePill';
 import {
   getArtworkUrl,
   getStreamUrl,
@@ -60,8 +61,9 @@ import {
 import { resolveProfileTokens, type ResolvedProfileToken } from '../lib/profileTokens';
 import { PublishModal } from '../components/PublishModal';
 import { arweaveTxDataUrl, turboTxDataUrl } from '../lib/arweaveDataGateway';
-import { queryPermanentUploadsByOwner, queryAtomicAssetsByCreator, type AtomicAssetSummary } from '../lib/arweaveDiscovery';
+import { queryPermanentUploadsByOwner, queryAtomicAssetsByCreator, findAudioTxIdForAtomicAsset, type AtomicAssetSummary } from '../lib/arweaveDiscovery';
 import { arweaveArtistPath, looksLikeWalletAddress } from '../lib/arweaveArtist';
+import { trackDetailPath } from '../lib/arweaveTxDetail';
 import { readUploadLedger } from '../lib/uploadLedger';
 import {
   matchUploadedTrackToAudiusTrack,
@@ -71,6 +73,12 @@ import {
   uploadedTrackShareUrl,
   type UploadedTrackRecord,
 } from '../lib/uploadedTracks';
+import {
+  fetchListedAssetsForProfile,
+  type MarketplaceListing,
+} from '../lib/ucmMarketplace';
+import { bazarAssetUrl } from '../lib/ucm';
+import { ATOMIC_ASSET_BADGE } from '../lib/trackBadges';
 import { useApi } from '@arweave-wallet-kit/react';
 import styles from './Profile.module.css';
 
@@ -185,6 +193,9 @@ export function Profile() {
   const [localSamples, setLocalSamples] = useState<LocalSample[]>([]);
   const [chainProfileUploads, setChainProfileUploads] = useState<UploadedTrackRecord[]>([]);
   const [chainAtomicAssets, setChainAtomicAssets] = useState<AtomicAssetSummary[]>([]);
+  const [zoneAudioAssets, setZoneAudioAssets] = useState<AtomicAssetSummary[]>([]);
+  const [chainUploadsLoading, setChainUploadsLoading] = useState(false);
+  const [chainUploadsError, setChainUploadsError] = useState<string | null>(null);
   const [copiedTxId, setCopiedTxId] = useState<string | null>(null);
   const [copiedShareUrl, setCopiedShareUrl] = useState(false);
   const [copiedProfileId, setCopiedProfileId] = useState(false);
@@ -216,6 +227,8 @@ export function Profile() {
   /** Tracks registered on AO for this wallet (any connected address merged when viewing own profile). */
   const [aoPublishedTracks, setAoPublishedTracks] = useState<RegisteredTrackRecord[]>([]);
   const [profileTokens, setProfileTokens] = useState<ResolvedProfileToken[]>([]);
+  const [listedOnUcm, setListedOnUcm] = useState<MarketplaceListing[]>([]);
+  const [listedOnUcmLoading, setListedOnUcmLoading] = useState(false);
   const tokenResolveTimerRef = useRef<number | null>(null);
   const profileSaveInFlightRef = useRef(false);
   const aoTokens = useMemo(
@@ -353,12 +366,40 @@ export function Profile() {
     return false;
   }, [connectedAddress, profileWalletAddress, routeProfileRef, cachedOwnProfileId, normalizedProfile]);
 
+  const resolvedAddress = useMemo(() => {
+    if (profileWalletAddress) return profileWalletAddress;
+    if (isOwn && connectedAddress) return connectedAddress;
+    return routeProfileRef || null;
+  }, [connectedAddress, isOwn, profileWalletAddress, routeProfileRef]);
+
   const uploadWalletAddress = useMemo(() => {
     if (profileWalletAddress) return profileWalletAddress;
     if (isOwn && connectedAddress) return connectedAddress;
-    if (routeProfileRef && looksLikeWalletAddress(routeProfileRef)) return routeProfileRef;
+    // Profile zone process ids are also 43-char — never use them as L1 `owners:` filters.
+    const zoneId = normalizedProfile?.id ? String(normalizedProfile.id) : '';
+    if (
+      routeProfileRef &&
+      looksLikeWalletAddress(routeProfileRef) &&
+      (!zoneId || routeProfileRef !== zoneId)
+    ) {
+      return routeProfileRef;
+    }
+    if (
+      resolvedAddress &&
+      looksLikeWalletAddress(resolvedAddress) &&
+      (!zoneId || resolvedAddress !== zoneId)
+    ) {
+      return resolvedAddress;
+    }
     return null;
-  }, [profileWalletAddress, connectedAddress, isOwn, routeProfileRef]);
+  }, [
+    profileWalletAddress,
+    connectedAddress,
+    isOwn,
+    resolvedAddress,
+    routeProfileRef,
+    normalizedProfile?.id,
+  ]);
 
   useEffect(() => {
     if (searchParams.get('edit') !== '1' || !normalizedProfile?.id || !isOwn) return;
@@ -367,12 +408,6 @@ export function Profile() {
     next.delete('edit');
     setSearchParams(next, { replace: true });
   }, [isOwn, normalizedProfile?.id, searchParams, setSearchParams]);
-
-  const resolvedAddress = useMemo(() => {
-    if (profileWalletAddress) return profileWalletAddress;
-    if (isOwn && connectedAddress) return connectedAddress;
-    return routeProfileRef || null;
-  }, [connectedAddress, isOwn, profileWalletAddress, routeProfileRef]);
 
   const avatarRaw = useMemo(
     () =>
@@ -403,6 +438,7 @@ export function Profile() {
     sources: avatarSources,
     sourceIndex: avatarSourceIndex,
     onError: handleAvatarImageError,
+    onLoad: handleAvatarImageLoaded,
   } = useArweaveMediaSources(avatarRaw);
 
   const {
@@ -410,6 +446,7 @@ export function Profile() {
     sources: bannerSources,
     sourceIndex: bannerSourceIndex,
     onError: handleBannerImageError,
+    onLoad: handleBannerImageLoaded,
   } = useArweaveMediaSources(bannerRaw);
 
   useEffect(() => {
@@ -443,12 +480,14 @@ export function Profile() {
   }, [activeBannerSource, bannerSourceIndex, bannerSources, handleBannerImageError]);
 
   const handleAvatarImageLoad = useCallback(() => {
+    handleAvatarImageLoaded();
     if (activeAvatarSource) console.info('[profile] avatar image loaded', activeAvatarSource);
-  }, [activeAvatarSource]);
+  }, [activeAvatarSource, handleAvatarImageLoaded]);
 
   const handleBannerImageLoad = useCallback(() => {
+    handleBannerImageLoaded();
     if (activeBannerSource) console.info('[profile] banner image loaded', activeBannerSource);
-  }, [activeBannerSource]);
+  }, [activeBannerSource, handleBannerImageLoaded]);
 
   const profileAssets = useMemo(
     () => (normalizedProfile ? collectProfileAssetRefs(normalizedProfile) : []),
@@ -964,8 +1003,13 @@ export function Profile() {
     if (!uploadWalletAddress) {
       setChainProfileUploads([]);
       setChainAtomicAssets([]);
+      setZoneAudioAssets([]);
+      setChainUploadsLoading(false);
+      setChainUploadsError(null);
       return;
     }
+    setChainUploadsLoading(true);
+    setChainUploadsError(null);
     void Promise.all([
       queryPermanentUploadsByOwner(uploadWalletAddress, 50),
       queryAtomicAssetsByCreator(uploadWalletAddress, 50),
@@ -974,13 +1018,18 @@ export function Profile() {
         if (!cancelled) {
           setChainProfileUploads(uploads);
           setChainAtomicAssets(assets);
+          setChainUploadsError(null);
         }
       })
-      .catch(() => {
+      .catch((e: unknown) => {
         if (!cancelled) {
-          setChainProfileUploads([]);
-          setChainAtomicAssets([]);
+          setChainUploadsError(
+            (e as Error)?.message || 'Could not load Arweave uploads from GraphQL. Showing device cache only.'
+          );
         }
+      })
+      .finally(() => {
+        if (!cancelled) setChainUploadsLoading(false);
       });
     return () => {
       cancelled = true;
@@ -994,13 +1043,17 @@ export function Profile() {
       void Promise.all([
         queryPermanentUploadsByOwner(uploadWalletAddress, 50),
         queryAtomicAssetsByCreator(uploadWalletAddress, 50),
-      ]).then(([uploads, assets]) => {
-        setChainProfileUploads(uploads);
-        setChainAtomicAssets(assets);
-      }).catch(() => {
-        setChainProfileUploads([]);
-        setChainAtomicAssets([]);
-      });
+      ])
+        .then(([uploads, assets]) => {
+          setChainProfileUploads(uploads);
+          setChainAtomicAssets(assets);
+          setChainUploadsError(null);
+        })
+        .catch((e: unknown) => {
+          setChainUploadsError(
+            (e as Error)?.message || 'Could not refresh Arweave uploads from GraphQL.'
+          );
+        });
     };
     window.addEventListener('streamvault:profile-updated', onUpdate);
     window.addEventListener('streamvault:uploads-updated', onUpdate);
@@ -1085,7 +1138,7 @@ export function Profile() {
         walletAddress: row.walletAddress || prev?.walletAddress || uploadWalletAddress || undefined,
       });
     }
-    for (const asset of chainAtomicAssets) {
+    for (const asset of [...chainAtomicAssets, ...zoneAudioAssets]) {
       if (asset.audioTxId) {
         const prev = byTx.get(asset.audioTxId);
         byTx.set(asset.audioTxId, {
@@ -1129,7 +1182,7 @@ export function Profile() {
     return Array.from(byTx.values()).sort(
       (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
     );
-  }, [aoPublishedTracks, chainAtomicAssets, chainProfileUploads, localSamples, profileArweaveTracks, uploadWalletAddress]);
+  }, [aoPublishedTracks, chainAtomicAssets, zoneAudioAssets, chainProfileUploads, localSamples, profileArweaveTracks, uploadWalletAddress]);
 
   const useUnifiedMusicGrid = visibleAudiusTracks.length > 0;
 
@@ -1154,8 +1207,120 @@ export function Profile() {
     const inTrackGrid = new Set(
       mergedProfileUploads.map((upload) => String(upload.assetId || '').trim()).filter(Boolean)
     );
-    return atomicAssets.filter((asset) => asset.id && !inTrackGrid.has(asset.id));
+    return atomicAssets.filter((asset) => {
+      if (!asset.id || inTrackGrid.has(asset.id)) return false;
+      // Audio atomic assets belong in the tracks grid once linked; hide MIME noise here.
+      const assetType = String(asset.debug.assetType || '').toLowerCase();
+      if (assetType.startsWith('audio/')) return false;
+      return true;
+    });
   }, [atomicAssets, mergedProfileUploads]);
+
+  /** Backfill track rows from zone audio atomic assets when L1 owner GraphQL is empty/partial. */
+  useEffect(() => {
+    let cancelled = false;
+    const audioAssets = atomicAssets.filter((asset) =>
+      String(asset.debug.assetType || '')
+        .toLowerCase()
+        .startsWith('audio/')
+    );
+    if (audioAssets.length === 0) {
+      setZoneAudioAssets([]);
+      return;
+    }
+
+    const knownAssetIds = new Set<string>([
+      ...chainAtomicAssets.map((asset) => asset.assetId).filter(Boolean),
+      ...mergedProfileUploads.map((upload) => String(upload.assetId || '').trim()).filter(Boolean),
+    ]);
+    const missing = audioAssets.filter((asset) => asset.id && !knownAssetIds.has(asset.id));
+    if (missing.length === 0) return;
+
+    void (async () => {
+      const extras: AtomicAssetSummary[] = [];
+      for (const asset of missing.slice(0, 24)) {
+        const audioTxId = await findAudioTxIdForAtomicAsset(asset.id).catch(() => null);
+        if (!audioTxId) continue;
+        extras.push({
+          assetId: asset.id,
+          audioTxId,
+          title: asset.name || 'Untitled',
+          artist: 'Unknown',
+          artworkTxId: undefined,
+          walletAddress: uploadWalletAddress || undefined,
+        });
+      }
+      if (cancelled || extras.length === 0) return;
+      setZoneAudioAssets((prev) => {
+        const byId = new Map(prev.map((row) => [row.assetId, row]));
+        for (const row of extras) {
+          if (!byId.has(row.assetId)) byId.set(row.assetId, row);
+        }
+        return Array.from(byId.values());
+      });
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [atomicAssets, chainAtomicAssets, mergedProfileUploads, uploadWalletAddress]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const wallet = uploadWalletAddress || connectedAddress || '';
+    if (!wallet) {
+      setListedOnUcm([]);
+      return;
+    }
+
+    const assets = mergedProfileUploads
+      .map((upload) => {
+        const assetId = String(upload.assetId || '').trim();
+        if (!assetId) return null;
+        return { assetId, track: uploadedTrackToPlayerTrack(upload) };
+      })
+      .filter(Boolean) as Array<{ assetId: string; track: Track }>;
+
+    if (assets.length === 0) {
+      setListedOnUcm([]);
+      return;
+    }
+
+    setListedOnUcmLoading(true);
+    void fetchListedAssetsForProfile({
+      assets,
+      walletAddress: wallet,
+      profileId: normalizedProfile?.id ? String(normalizedProfile.id) : null,
+      limit: 24,
+    })
+      .then((rows) => {
+        if (!cancelled) setListedOnUcm(rows);
+      })
+      .catch(() => {
+        if (!cancelled) setListedOnUcm([]);
+      })
+      .finally(() => {
+        if (!cancelled) setListedOnUcmLoading(false);
+      });
+
+    const onUpdate = () => {
+      void fetchListedAssetsForProfile({
+        assets,
+        walletAddress: wallet,
+        profileId: normalizedProfile?.id ? String(normalizedProfile.id) : null,
+        limit: 24,
+      })
+        .then((rows) => {
+          if (!cancelled) setListedOnUcm(rows);
+        })
+        .catch(() => {});
+    };
+    window.addEventListener('streamvault:marketplace-updated', onUpdate);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('streamvault:marketplace-updated', onUpdate);
+    };
+  }, [connectedAddress, mergedProfileUploads, normalizedProfile?.id, uploadWalletAddress]);
 
   const handleAddSample = async () => {
     if (!libs?.addToZone || !normalizedProfile?.id || walletType !== 'arweave') return;
@@ -1568,22 +1733,6 @@ export function Profile() {
     };
 
     try {
-      // #region agent log
-      const _dbgFetch = globalThis.fetch.bind(globalThis);
-      _dbgFetch('http://127.0.0.1:7875/ingest/e73f4289-b39c-483d-adc2-eb8e696a88dd', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '935ac8' },
-        body: JSON.stringify({
-          sessionId: '935ac8',
-          runId: 'pre-fix',
-          hypothesisId: 'H0',
-          location: 'Profile.tsx:handleEditProfile',
-          message: 'edit save start',
-          data: { profileId, walletType, hasConnectedAddress: Boolean(connectedAddress) },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
       const signerWallet = resolveArweaveSigner(arweaveApi);
       await connectArweaveSignerForProfile(signerWallet);
 
@@ -1639,22 +1788,6 @@ export function Profile() {
 
       persistConfirmedProfile(onChain);
     } catch (e: any) {
-      // #region agent log
-      const _dbgFetch = globalThis.fetch.bind(globalThis);
-      _dbgFetch('http://127.0.0.1:7875/ingest/e73f4289-b39c-483d-adc2-eb8e696a88dd', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '935ac8' },
-        body: JSON.stringify({
-          sessionId: '935ac8',
-          runId: 'pre-fix',
-          hypothesisId: 'H0',
-          location: 'Profile.tsx:handleEditProfile',
-          message: 'edit save failed',
-          data: { profileId, error: String(e?.message || e) },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
       console.error('[profile] edit failed', e);
       setError(e?.message || 'Profile update failed. Your on-chain profile was not changed.');
     } finally {
@@ -1872,8 +2005,7 @@ export function Profile() {
                           footerContent={
                             matchedUpload ? (
                               <>
-                                <span className={styles.sourcePill}>Arweave</span>
-                                <UploadedTrackMeta track={matchedUpload} compact />
+                                <UploadedTrackMeta track={matchedUpload} compact sourceLabel="Arweave" />
                               </>
                             ) : (
                               <>
@@ -1886,7 +2018,7 @@ export function Profile() {
                                     Publish
                                   </button>
                                 )}
-                                <span className={styles.sourcePill}>Audius</span>
+                                <SourcePill label="Audius" />
                               </>
                             )
                           }
@@ -1956,11 +2088,13 @@ export function Profile() {
                   <span className={styles.mono}>{token.ticker || token.name}</span>
                   <span className={styles.monoValue}>{token.name}</span>
                   <span className={styles.monoValue}>{token.id.slice(0, 12)}…</span>
-                  <span className={styles.monoValue}>
-                    debug: kind={token.kind} source={token.debug.infoSource}
-                    {token.debug.assetType ? ` assetType=${token.debug.assetType}` : ''}
-                    {' '}denom={token.denomination} raw={token.rawBalance}
-                  </span>
+                  {profileDebug && (
+                    <span className={styles.monoValue}>
+                      debug: kind={token.kind} source={token.debug.infoSource}
+                      {token.debug.assetType ? ` assetType=${token.debug.assetType}` : ''}
+                      {' '}denom={token.denomination} raw={token.rawBalance}
+                    </span>
+                  )}
                 </div>
                 <div className={styles.sampleLinks}>
                   {token.imageUrl && <img src={token.imageUrl} alt="" className={styles.tokenImg} />}
@@ -1996,11 +2130,13 @@ export function Profile() {
                   <span className={styles.mono}>{asset.name}</span>
                   {asset.ticker && <span className={styles.monoValue}>{asset.ticker}</span>}
                   <span className={styles.monoValue}>{asset.id.slice(0, 12)}…</span>
-                  <span className={styles.monoValue}>
-                    debug: kind={asset.kind} source={asset.debug.infoSource}
-                    {asset.debug.assetType ? ` assetType=${asset.debug.assetType}` : ''}
-                    {' '}qty={asset.rawBalance}
-                  </span>
+                  {profileDebug && (
+                    <span className={styles.monoValue}>
+                      debug: kind={asset.kind} source={asset.debug.infoSource}
+                      {asset.debug.assetType ? ` assetType=${asset.debug.assetType}` : ''}
+                      {' '}qty={asset.rawBalance}
+                    </span>
+                  )}
                 </div>
                 <div className={styles.sampleLinks}>
                   {asset.imageUrl && <img src={asset.imageUrl} alt="" className={styles.tokenImg} />}
@@ -2103,6 +2239,82 @@ export function Profile() {
         </section>
       )}
 
+      {chainUploadsError && isOwn ? (
+        <p className={styles.subtext} style={{ marginTop: '8px' }}>
+          {chainUploadsError}
+        </p>
+      ) : null}
+
+      {isOwn &&
+        !chainUploadsLoading &&
+        visibleProfileUploads.length === 0 &&
+        mergedProfileUploads.length === 0 &&
+        uploadWalletAddress && (
+          <section className={styles.section + ' ' + styles.sectionTight}>
+            <p className={styles.subtext}>
+              No Arweave uploads found for this wallet yet.
+              {chainUploadsError ? ' GraphQL is temporarily unavailable — try Refresh or check local device uploads in Vault Library.' : ''}
+            </p>
+          </section>
+        )}
+
+      {(listedOnUcmLoading || listedOnUcm.length > 0) && (
+        <section className={styles.section + ' ' + styles.sectionTight}>
+          <div className={styles.sectionHeader}>
+            <h2 className={styles.sectionTitle}>Listed on UCM</h2>
+          </div>
+          <p className={styles.subtext}>
+            Atomic assets from this profile with readable active sell orders on UCM.
+          </p>
+          {listedOnUcmLoading && listedOnUcm.length === 0 ? (
+            <LogoSpinner />
+          ) : (
+            <div className={styles.trackGrid}>
+              {listedOnUcm.map((listing) => (
+                <TrackCard
+                  key={listing.orderId}
+                  track={listing.track}
+                  titleHref={trackDetailPath(listing.audioTxId)}
+                  artistHref={
+                    listing.track.artistId && looksLikeWalletAddress(listing.track.artistId)
+                      ? arweaveArtistPath(listing.track.artistId)
+                      : uploadWalletAddress
+                        ? arweaveArtistPath(uploadWalletAddress)
+                        : undefined
+                  }
+                  showPermanentBadge={false}
+                  footerContent={
+                    <>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 6 }}>
+                        <SourcePill label={ATOMIC_ASSET_BADGE} />
+                        <SourcePill
+                          label={
+                            listing.escrowedUnread
+                              ? listing.priceDisplay === '—'
+                                ? 'Escrowed on UCM'
+                                : `${listing.priceDisplay} ${listing.quoteSymbol} · syncing`
+                              : `${listing.priceDisplay} ${listing.quoteSymbol}`
+                          }
+                        />
+                        <SourcePill label="UCM" />
+                      </div>
+                      <a
+                        href={bazarAssetUrl(listing.assetId)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className={styles.link}
+                      >
+                        Bazar
+                      </a>
+                    </>
+                  }
+                />
+              ))}
+            </div>
+          )}
+        </section>
+      )}
+
       {visibleProfileUploads.length > 0 && (
         <section className={styles.section + ' ' + styles.sectionTight}>
           <div className={styles.sectionHeader}>
@@ -2126,8 +2338,7 @@ export function Profile() {
                 showPermanentBadge={false}
                 footerContent={
                   <>
-                    <span className={styles.sourcePill}>Arweave</span>
-                    <UploadedTrackMeta track={sample} compact />
+                    <UploadedTrackMeta track={sample} compact sourceLabel="Arweave" />
                   </>
                 }
               />
@@ -2196,12 +2407,12 @@ export function Profile() {
                 showPermanentBadge={false}
                 footerContent={
                   <>
-                    <span className={styles.sourcePill}>Arweave</span>
                     <UploadedTrackMeta
                       track={{
                         txId: t.audioTxId,
                         title: t.tags?.Title || 'Untitled',
                         artist: t.tags?.Artist || '',
+                        assetId: t.assetId,
                         createdAt: new Date((t.createdAt || 0) * 1000).toISOString(),
                         udl: t.udl
                           ? {
@@ -2217,6 +2428,7 @@ export function Profile() {
                           : undefined,
                       }}
                       compact
+                      sourceLabel="Arweave"
                     />
                   </>
                 }
@@ -2254,8 +2466,7 @@ export function Profile() {
                 showPermanentBadge={false}
                 footerContent={
                   <>
-                    <span className={styles.sourcePill}>Arweave</span>
-                    <UploadedTrackMeta track={sample} compact />
+                    <UploadedTrackMeta track={sample} compact sourceLabel="Arweave" />
                   </>
                 }
               />

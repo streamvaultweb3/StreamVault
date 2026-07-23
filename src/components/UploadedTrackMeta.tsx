@@ -1,8 +1,10 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { trackDetailPath } from '../lib/arweaveTxDetail';
+import { trackBadgeTone } from '../lib/trackBadges';
 import type { UploadedTrackRecord } from '../lib/uploadedTracks';
 import { uploadedTrackCompactBadges, uploadedTrackLicenseBadges, uploadedTrackShareUrl } from '../lib/uploadedTracks';
+import { SourcePill } from './SourcePill';
 import styles from './UploadedTrackMeta.module.css';
 
 interface UploadedTrackMetaProps {
@@ -10,12 +12,30 @@ interface UploadedTrackMetaProps {
   compact?: boolean;
   /** Hide badge row (e.g. when badges render in parent). */
   hideBadges?: boolean;
+  /**
+   * Compact tiles only: source pill shown after Atomic Asset (e.g. "Arweave").
+   * Permanent is omitted — Arweave already implies permanence.
+   */
+  sourceLabel?: string | null;
 }
 
-export function UploadedTrackMeta({ track, compact = false, hideBadges = false }: UploadedTrackMetaProps) {
+function badgeClassName(label: string): string {
+  const tone = trackBadgeTone(label);
+  if (tone === 'atomic') return `${styles.badge} ${styles.badgeAtomic}`;
+  if (tone === 'permanent') return `${styles.badge} ${styles.badgePermanent}`;
+  return styles.badge;
+}
+
+export function UploadedTrackMeta({
+  track,
+  compact = false,
+  hideBadges = false,
+  sourceLabel,
+}: UploadedTrackMetaProps) {
   const [copied, setCopied] = useState(false);
   const url = uploadedTrackShareUrl(track);
   const badges = compact ? uploadedTrackCompactBadges(track) : uploadedTrackLicenseBadges(track);
+  const showSource = Boolean(compact && sourceLabel);
 
   const handleCopy = async () => {
     try {
@@ -29,11 +49,14 @@ export function UploadedTrackMeta({ track, compact = false, hideBadges = false }
 
   return (
     <div className={compact ? `${styles.wrap} ${styles.wrapCompact}` : styles.wrap}>
-      {!hideBadges && badges.length > 0 && (
+      {!hideBadges && (badges.length > 0 || showSource) && (
         <div className={compact ? `${styles.badges} ${styles.badgesCompact}` : styles.badges}>
           {badges.map((badge) => (
-            <span key={badge} className={styles.badge}>{badge}</span>
+            <span key={badge} className={badgeClassName(badge)}>
+              {badge}
+            </span>
           ))}
+          {showSource ? <SourcePill label={String(sourceLabel)} /> : null}
         </div>
       )}
       <div className={compact ? `${styles.actions} ${styles.actionsCompact}` : styles.actions}>

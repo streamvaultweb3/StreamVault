@@ -26,7 +26,7 @@ interface PublishModalProps {
 }
 
 export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
-  const { libs } = usePermaweb();
+  const { libs, getWritableLibs } = usePermaweb();
   const { address, walletType, connect, isConnecting } = useWallet();
   const {
     audiusUser,
@@ -47,6 +47,7 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
     | 'confirming'
     | 'waiting-gateway'
     | 'creating-atomic-asset'
+    | 'confirming-atomic-asset'
     | 'registering-ao'
     | 'done'
     | 'error';
@@ -361,16 +362,19 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
       if (!effectiveAudio && useAudiusStreamForFull && track?.streamUrl) {
         try {
           const maxBytes = useTurbo ? 50 * 1024 * 1024 : 10 * 1024 * 1024;
-          effectiveAudio = await fetchAudiusStreamAsBlob(track.streamUrl, { maxBytes });
-        } catch (e: any) {
+          effectiveAudio = await fetchAudiusStreamAsBlob(track.streamUrl, {
+            maxBytes,
+            audiusTrackId: track.id,
+          });
+        } catch (e: unknown) {
           setStatus('error');
-          const message = String(e?.message || e || '').trim();
+          setPublishStage('error');
+          const message = String((e as { message?: string })?.message || e || '').trim();
           setErrorMessage(
-            message === 'Failed to fetch'
-              ? 'Could not download the full track from the Audius stream. This is usually a browser CORS/CDN issue before upload begins. Upload the audio file from disk instead, or retry later if the Audius stream becomes reachable.'
-              : message ||
-                  'Could not download the full track from the Audius stream (often CORS or size). Upload the audio file from disk instead.'
+            message ||
+              'Could not download the full track from the Audius stream. Upload the audio file from disk instead, or retry after refreshing the page.'
           );
+          isSubmittingRef.current = false;
           return;
         }
       }
@@ -453,7 +457,7 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
           fromAudiusStream: Boolean(useAudiusStreamForFull && track?.streamUrl),
         },
         address,
-        { libs },
+        { libs, getWritableLibs },
         {
           onStage: (stage) => {
             setPublishStage(stage);
@@ -487,7 +491,9 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
       setResult(res);
       setStatus(res.success ? 'done' : 'error');
       setPublishStage(res.success ? 'done' : 'error');
-      if (res.error) setErrorMessage(res.error);
+      // Soft mint-pending messages are informational, not hard failures.
+      if (res.error && !res.mintPending) setErrorMessage(res.error);
+      else if (res.mintPending && res.error) setErrorMessage(null);
       console.info('[publish] Result', res);
       if (res.success && res.txId && address) {
         try {
@@ -599,6 +605,9 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
     if (publishStage === 'confirming') return 'Waiting for Arweave confirmation…';
     if (publishStage === 'waiting-gateway') return 'Waiting for gateways to serve audio…';
     if (publishStage === 'creating-atomic-asset') return 'Creating atomic asset…';
+    if (publishStage === 'confirming-atomic-asset') {
+      return 'Confirming atomic mint on HyperBEAM (can take a few minutes)…';
+    }
     if (publishStage === 'registering-ao') return 'Registering on AO (best-effort)…';
     if (publishStage === 'done') return 'Done.';
     if (publishStage === 'error') return 'Upload failed.';
@@ -617,6 +626,7 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
     publishStage === 'confirming' ||
     publishStage === 'waiting-gateway' ||
     publishStage === 'creating-atomic-asset' ||
+    publishStage === 'confirming-atomic-asset' ||
     publishStage === 'registering-ao';
 
   const primaryButtonLabel = useMemo(() => {
@@ -626,10 +636,16 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
     if (publishStage === 'uploading-cover' || publishStage === 'uploading-audio') return 'Uploading…';
     if (publishStage === 'confirming') return 'Confirming…';
     if (publishStage === 'waiting-gateway') return 'Waiting for gateways…';
-    if (publishStage === 'creating-atomic-asset' || publishStage === 'registering-ao') return 'Finalizing…';
+    if (
+      publishStage === 'creating-atomic-asset' ||
+      publishStage === 'confirming-atomic-asset' ||
+      publishStage === 'registering-ao'
+    ) {
+      return 'Finalizing…';
+    }
     if (isBusy) return 'Working…';
-    return 'Upload';
-  }, [address, isBusy, publishStage, status]);
+    return createAtomicAssetExperimental ? 'Publish + mint atomic asset' : 'Publish track';
+  }, [address, createAtomicAssetExperimental, isBusy, publishStage, status]);
 
   const txIdToShow = result?.txId || currentTxId;
   const permawebUrlToShow = result?.permawebUrl || (txIdToShow ? arweaveTxDataUrl(txIdToShow) : null);
@@ -958,10 +974,21 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
                   onChange={(e) => setCreateAtomicAssetExperimental(e.target.checked)}
                 />
                 <span>
-                  Create atomic asset (experimental) — may break if HyperBEAM/system-wide changes roll out. Default is a
-                  standard Arweave upload with UDL tags only.
+                  Create atomic asset (experimental) — only when checked does StreamVault call{' '}
+                  <code>createAtomicAsset</code> (AO mint). Leave unchecked for a regular Arweave data upload with UDL
+                  tags only (recommended).
                 </span>
               </label>
+              {!createAtomicAssetExperimental && (
+                <p className={styles.hint}>
+                  Publishing mode: regular track upload (no atomic mint).
+                </p>
+              )}
+              {createAtomicAssetExperimental && (
+                <p className={styles.hint}>
+                  Publishing mode: experimental atomic asset mint after the audio upload.
+                </p>
+              )}
               <label className={styles.label}>
                 Royalties (bps)
                 <input
@@ -1011,18 +1038,34 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
         {status === 'done' && result?.success && (
           <div className={styles.success}>
             <span className={styles.successBadge}>Permanent</span>
-            {(result.confirmed === false || result.gatewayReady === false) && (
+            {(result.confirmed === false || result.gatewayReady === false || result.mintPending) && (
               <span className={styles.pendingBadge}>
-                {result.confirmed === false ? 'Pending' : 'Processing'}
+                {result.mintPending
+                  ? 'Mint confirming'
+                  : result.confirmed === false
+                    ? 'Pending'
+                    : 'Processing'}
               </span>
             )}
             <p className={styles.successText}>
-              {result.confirmed === false
+              {result.mintPending
+                ? 'Audio is permanent on Arweave. Atomic mint is still confirming on HyperBEAM — refresh this page in a few minutes to see the process id.'
+                : result.confirmed === false
                 ? 'Upload accepted. Waiting for block confirmation before gateways reliably stream the file.'
                 : result.gatewayReady === false
                   ? 'Upload is confirmed on Arweave, but gateway playback is still propagating. The file exists, but streaming may not work yet.'
-                  : 'Upload complete. Your full track is on Arweave.'}
+                  : result.assetId
+                    ? 'Upload complete. Your full track and atomic asset are on Arweave / AO.'
+                    : 'Upload complete. Your full track is on Arweave.'}
             </p>
+            {result.mintPending && result.error && (
+              <p className={styles.hint}>{result.error}</p>
+            )}
+            {result.assetId && (
+              <p className={styles.hint}>
+                Atomic asset process: <code>{result.assetId}</code>
+              </p>
+            )}
             {useTurbo && (
               <p className={styles.hint}>
                 {turboToken === 'arweave' ? (
@@ -1117,6 +1160,7 @@ export function PublishModal({ track, onClose, onSuccess }: PublishModalProps) {
                 assetId={result.assetId}
                 title={customTitle || undefined}
                 defaultPriceAr="0.1"
+                assumeOwner
                 className={styles.ucmSuccessBlock}
               />
             ) : null}

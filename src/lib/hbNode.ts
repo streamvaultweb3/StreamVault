@@ -1,7 +1,17 @@
 import { resolveHbReadNodeUrls } from './aoNode';
+import {
+  resolveHbReadNodeUrlsForProcess,
+  resolvePreferredNodesForProcess,
+} from './hbScheduler';
 
 /** Per-node HB GET/POST cap — fail fast to next node (Portal is often slow). */
 export const HB_REQUEST_TIMEOUT_MS = 8_000;
+
+/**
+ * After a *rich* non-owner response, briefly wait for the scheduler-matching node
+ * before accepting the fast peer (covers Portal-owned assets answered early by Bazar).
+ */
+export const HB_OWNER_PREFER_GRACE_MS = 3_000;
 
 type HbRequestArgs = {
   url: string;
@@ -145,33 +155,190 @@ export type HyperbeamReadResult = {
   url: string;
 };
 
-/** Try Portal HB first, then configured fallbacks (e.g. Bazar `app-1.forward.computer`). */
+function normalizeNodeBase(url: string): string {
+  return String(url || '').replace(/\/+$/, '');
+}
+
+/** True when Balances looks like real holdings (not empty [] / {}). */
+export function hyperbeamBalancesHaveHoldings(json: unknown): boolean {
+  if (!json || typeof json !== 'object') return false;
+  const body = json as Record<string, unknown>;
+  const bal = body.Balances ?? body.balances;
+  if (!bal || typeof bal !== 'object') return false;
+  if (Array.isArray(bal)) {
+    return bal.some((row) => {
+      if (!row || typeof row !== 'object') return false;
+      const qty = Number((row as Record<string, unknown>).Balance ?? (row as Record<string, unknown>).balance ?? 0);
+      return Number.isFinite(qty) && qty > 0;
+    });
+  }
+  return Object.values(bal as Record<string, unknown>).some((v) => {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0;
+  });
+}
+
+/**
+ * Race HB peers, but do not let a fast empty Bazar answer beat the scheduler-matching
+ * owner node (Portal / operator) while that owner read is still in flight.
+ */
+async function raceHbNodes(args: {
+  processId: string;
+  subpath: string;
+  label?: string;
+  validate: (json: unknown) => boolean;
+  nodes: string[];
+  /** Scheduler-matching node bases — preferred over faster empty peers. */
+  preferredNodeUrls?: string[];
+}): Promise<HyperbeamReadResult | null> {
+  if (args.nodes.length === 0) return null;
+
+  const preferred = new Set(
+    (args.preferredNodeUrls || []).map(normalizeNodeBase).filter(Boolean)
+  );
+  const nodes = args.nodes.map(normalizeNodeBase).filter(Boolean);
+  const preferredInFlight = new Set(nodes.filter((n) => preferred.has(n)));
+
+  // No owner match → classic first-valid wins (Bazar-first latency behavior).
+  if (preferredInFlight.size === 0) {
+    return new Promise((resolve) => {
+      let remaining = nodes.length;
+      let settled = false;
+      for (const base of nodes) {
+        const url = `${base}/${args.processId}~process@1.0/${args.subpath}`;
+        void hbRequest({
+          label: args.label || `hb-read:${args.subpath}`,
+          url,
+          method: 'GET',
+          headers: HB_READ_HEADERS,
+        })
+          .then((res) => {
+            if (settled) return;
+            if (!res.json || isHyperbeamReadFailure(res.json, res.text)) return;
+            if (!args.validate(res.json)) return;
+            settled = true;
+            resolve({ json: res.json as Record<string, unknown>, nodeUrl: base, url });
+          })
+          .catch(() => {})
+          .finally(() => {
+            remaining -= 1;
+            if (!settled && remaining <= 0) resolve(null);
+          });
+      }
+    });
+  }
+
+  return new Promise((resolve) => {
+    let remaining = nodes.length;
+    let settled = false;
+    let graceTimer: ReturnType<typeof setTimeout> | null = null;
+    let richFallback: HyperbeamReadResult | null = null;
+    let weakFallback: HyperbeamReadResult | null = null;
+
+    const finish = (result: HyperbeamReadResult | null) => {
+      if (settled) return;
+      settled = true;
+      if (graceTimer) clearTimeout(graceTimer);
+      resolve(result);
+    };
+
+    const takeBestFallback = () => richFallback || weakFallback;
+
+    const markPreferredDone = (base: string) => {
+      if (preferredInFlight.has(base)) preferredInFlight.delete(base);
+    };
+
+    for (const base of nodes) {
+      const url = `${base}/${args.processId}~process@1.0/${args.subpath}`;
+      const isPreferred = preferred.has(base);
+      void hbRequest({
+        label: args.label || `hb-read:${args.subpath}`,
+        url,
+        method: 'GET',
+        headers: HB_READ_HEADERS,
+      })
+        .then((res) => {
+          if (settled) return;
+          if (!res.json || isHyperbeamReadFailure(res.json, res.text)) return;
+          if (!args.validate(res.json)) return;
+          const result: HyperbeamReadResult = {
+            json: res.json as Record<string, unknown>,
+            nodeUrl: base,
+            url,
+          };
+
+          if (isPreferred) {
+            // Owner-node truth wins immediately (even empty Balances).
+            finish(result);
+            return;
+          }
+
+          const rich = hyperbeamBalancesHaveHoldings(result.json);
+          if (rich) {
+            if (
+              !richFallback ||
+              !hyperbeamBalancesHaveHoldings(richFallback.json)
+            ) {
+              richFallback = result;
+            }
+            // Still give the owner node a short window before accepting a rich peer.
+            if (preferredInFlight.size > 0 && !graceTimer) {
+              graceTimer = setTimeout(() => {
+                finish(takeBestFallback());
+              }, HB_OWNER_PREFER_GRACE_MS);
+            } else if (preferredInFlight.size === 0) {
+              finish(result);
+            }
+            return;
+          }
+
+          // Empty Balances from non-owner: hold weakly; never beat an in-flight owner.
+          if (!weakFallback) weakFallback = result;
+          if (preferredInFlight.size === 0) finish(takeBestFallback());
+        })
+        .catch(() => {})
+        .finally(() => {
+          remaining -= 1;
+          if (isPreferred) markPreferredDone(base);
+          if (settled) return;
+          if (preferredInFlight.size === 0) {
+            finish(takeBestFallback());
+            return;
+          }
+          if (remaining <= 0) finish(takeBestFallback());
+        });
+    }
+  });
+}
+
+/**
+ * Read process JSON from HyperBEAM.
+ * Scheduler-matching nodes (Portal / operator) win over faster empty Bazar answers.
+ */
 export async function fetchHyperbeamJson(args: {
   processId: string;
   subpath?: string;
   label?: string;
   validate?: (json: unknown) => boolean;
+  /** Skip spawn-tag lookup (use default read order). */
+  skipSchedulerPrefer?: boolean;
 }): Promise<HyperbeamReadResult | null> {
   const subpath = args.subpath || 'compute/asset';
   const validate = args.validate || (() => true);
-  for (const nodeBase of resolveHbReadNodeUrls()) {
-    const base = nodeBase.replace(/\/+$/, '');
-    const url = `${base}/${args.processId}~process@1.0/${subpath}`;
-    try {
-      const res = await hbRequest({
-        label: args.label || `hb-read:${subpath}`,
-        url,
-        method: 'GET',
-        headers: HB_READ_HEADERS,
-      });
-      if (!res.json || isHyperbeamReadFailure(res.json, res.text)) continue;
-      if (!validate(res.json)) continue;
-      return { json: res.json as Record<string, unknown>, nodeUrl: base, url };
-    } catch {
-      // try next node
-    }
-  }
-  return null;
+  const nodes = args.skipSchedulerPrefer
+    ? resolveHbReadNodeUrls()
+    : await resolveHbReadNodeUrlsForProcess(args.processId);
+  const preferredNodeUrls = args.skipSchedulerPrefer
+    ? []
+    : (await resolvePreferredNodesForProcess(args.processId)).map((n) => n.url);
+  return raceHbNodes({
+    processId: args.processId,
+    subpath,
+    label: args.label,
+    validate,
+    nodes,
+    preferredNodeUrls,
+  });
 }
 
 export async function fetchHyperbeamAssetState(processId: string): Promise<HyperbeamReadResult | null> {
@@ -183,3 +350,14 @@ export async function fetchHyperbeamAssetState(processId: string): Promise<Hyper
   });
 }
 
+/** Metadata subpath — TotalSupply often lives here when top-level asset state uses +link fields. */
+export async function fetchHyperbeamAssetMetadata(
+  processId: string
+): Promise<HyperbeamReadResult | null> {
+  return fetchHyperbeamJson({
+    processId,
+    subpath: 'compute/asset/Metadata',
+    label: 'hb-asset-metadata',
+    validate: (json) => Boolean(json && typeof json === 'object'),
+  });
+}

@@ -3,7 +3,9 @@ import { arweaveArtistPath } from '../../lib/arweaveArtist';
 import { fetchTrendingTracks } from '../../lib/arweaveDiscovery';
 import { TrackCard } from '../../components/TrackCard';
 import { LogoSpinner } from '../../components/LogoSpinner';
+import { SourcePill } from '../../components/SourcePill';
 import type { Track } from '../../context/PlayerContext';
+import { ATOMIC_ASSET_BADGE } from '../../lib/trackBadges';
 import styles from './Vault.module.css';
 
 export function VaultTrending() {
@@ -44,6 +46,13 @@ export function VaultTrending() {
               key={track.id}
               track={track}
               artistHref={track.artistId && track.artistId.length > 20 ? arweaveArtistPath(track.artistId) : undefined}
+              showPermanentBadge={false}
+              footerContent={
+                <>
+                  {track.assetId ? <SourcePill label={ATOMIC_ASSET_BADGE} /> : null}
+                  <SourcePill label="Arweave" />
+                </>
+              }
             />
           ))}
         </section>

@@ -6,7 +6,13 @@ import Permaweb from '@permaweb/libs';
 import { useWallet } from './WalletContext';
 import { useApi } from '@arweave-wallet-kit/react';
 import { runHbNodeDiagnostics } from '../lib/hbNode';
-import { resolveAoNode, resolveLegacyProfileWriteMuUrl } from '../lib/aoNode';
+import {
+  resolveAoNode,
+  resolveHbReadNodeUrls,
+  resolveHbWriteNodeUrls,
+  resolveLegacyProfileWriteMuUrl,
+  resolveOperatorAoNode,
+} from '../lib/aoNode';
 import { createResilientAoFetch } from '../lib/aoFetch';
 
 interface PermawebContextValue {
@@ -96,15 +102,16 @@ export function PermawebProvider({ children }: { children: React.ReactNode }) {
     const gqlUrlRaw =
       cleanEnv(import.meta.env.VITE_AO_GQL_URL as string | undefined) ||
       'https://ao-search-gateway.goldsky.com/graphql';
+    // Writable AO ops (spawn, push) must target Portal/write HB — not Bazar-first read peers.
     const aoUrl =
       aoMode === 'legacy'
         ? muUrl
-        : cleanEnv(options?.url) || node.url;
+        : cleanEnv(options?.url) || resolveHbWriteNodeUrls()[0] || node.url;
     const aoScheduler = cleanEnv(options?.scheduler) || node.scheduler;
     const aoAuthority = cleanEnv(options?.authority) || node.authority;
     const profileGateway = toGatewayHost(gqlUrlRaw);
     const signer = createDataItemSigner(injectedWallet);
-    const resilientFetch = createResilientAoFetch();
+    const resilientFetch = createResilientAoFetch({ writeNodeUrls: resolveHbWriteNodeUrls() });
 
     const ao =
       aoMode === 'mainnet'
@@ -164,13 +171,18 @@ export function PermawebProvider({ children }: { children: React.ReactNode }) {
       const gqlUrlRaw =
         cleanEnv(import.meta.env.VITE_AO_GQL_URL as string | undefined) ||
         'https://ao-search-gateway.goldsky.com/graphql';
-      const aoUrl = node.url;
+      // Prefer Bazar/read HB for libs.readProcess — Portal often CORS/502 from localhost.
+      const aoUrl =
+        aoMode === 'mainnet'
+          ? resolveHbReadNodeUrls()[0] || node.url
+          : node.url;
       const aoScheduler = node.scheduler;
       const aoAuthority = node.authority;
       const gqlUrl = gqlUrlRaw;
       const profileGateway = toGatewayHost(gqlUrlRaw);
 
       if (aoDebug) {
+        const operator = resolveOperatorAoNode();
         console.info('[ao] init', {
           aoMode,
           muUrl,
@@ -178,18 +190,25 @@ export function PermawebProvider({ children }: { children: React.ReactNode }) {
           aoUrl,
           aoScheduler,
           aoAuthority,
+          readNodes: resolveHbReadNodeUrls(),
+          writeNodes: resolveHbWriteNodeUrls(),
+          operatorNode: operator
+            ? { url: operator.url, scheduler: operator.scheduler || null, authority: operator.authority || null }
+            : null,
           gatewayUrl,
           gqlUrl,
           profileGateway,
           hasWallet: Boolean(signerWallet),
         });
       }
+      const resilientFetch = createResilientAoFetch({ writeNodeUrls: resolveHbWriteNodeUrls() });
       const ao =
         aoMode === 'mainnet'
           ? connect({
             MODE: 'mainnet',
             URL: aoUrl,
             SCHEDULER: aoScheduler,
+            fetch: resilientFetch,
           } as any)
           : connect({
             MODE: 'legacy',
@@ -197,7 +216,8 @@ export function PermawebProvider({ children }: { children: React.ReactNode }) {
             CU_URL: cuUrl,
             GATEWAY_URL: gatewayUrl,
             GRAPHQL_URL: gqlUrl,
-          });
+            fetch: resilientFetch,
+          } as any);
       const baseDeps = {
         ao,
         arweave: Arweave.init(DEFAULT_ARWEAVE_GATEWAY),

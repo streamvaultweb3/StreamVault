@@ -30,6 +30,12 @@
   font-size: var(--text-sm);
 }
 
+.success {
+  margin: 0;
+  color: #34d399;
+  font-size: var(--text-sm);
+}
+
 .row {
   display: flex;
   flex-direction: column;
@@ -110,13 +116,22 @@
 }
 
 .copyBtn,
-.refreshBtn {
+.refreshBtn,
+.repairBtn {
   padding: 4px 10px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--bg-glass-border);
   background: var(--bg-glass);
   color: var(--text-secondary);
   font-size: var(--text-xs);
+}
+
+.repairBtn {
+  align-self: flex-start;
+}
+
+.repairBtn:disabled {
+  opacity: 0.6;
 }
 
 .meta {

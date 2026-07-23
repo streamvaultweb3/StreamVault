@@ -5,7 +5,7 @@ import {
   arweaveTxStatusUrls,
   lunarTxExplorerUrl,
   normalizeArweaveTxId,
-  turboTxDataUrl,
+  preferredArweaveStreamUrl,
 } from './arweaveDataGateway';
 import { arweaveArtistPath, looksLikeWalletAddress } from './arweaveArtist';
 import { findAudioTxIdForAtomicAsset } from './arweaveDiscovery';
@@ -173,10 +173,10 @@ export function isAudioContentType(contentType?: string): boolean {
   return ct.startsWith('audio/') || ct.includes('mpeg') || ct.includes('mp3');
 }
 
-export function trackStreamUrl(txId: string, tags: ArweaveTag[], preferTurbo = true): string {
+export function trackStreamUrl(txId: string, _tags?: ArweaveTag[], preferTurbo = true): string {
   const id = normalizeArweaveTxId(txId);
-  if (preferTurbo && getTag(tags, 'App-Name') === 'StreamVault') {
-    return turboTxDataUrl(id);
+  if (preferTurbo) {
+    return preferredArweaveStreamUrl(id);
   }
   return arweaveTxDataUrl(id);
 }
@@ -186,7 +186,7 @@ export function artworkUrlFromTags(tags: ArweaveTag[]): string | undefined {
     getTag(tags, 'Artwork-Tx-Id') ||
     getTag(tags, 'Cover-Art-Tx-Id') ||
     getTag(tags, 'Thumbnail-Tx-Id');
-  return artworkId ? arweaveTxDataUrl(artworkId) : undefined;
+  return artworkId ? preferredArweaveStreamUrl(artworkId) : undefined;
 }
 
 function formatRoyaltiesValue(raw: string): string {
