@@ -16,6 +16,7 @@ import { VaultWallet } from './pages/vault/VaultWallet';
 import { VaultRewards } from './pages/vault/VaultRewards';
 import { VaultPlaceholder } from './pages/vault/VaultPlaceholder';
 import { TrackDetail } from './pages/TrackDetail';
+import { StreamVaultSdk } from './pages/StreamVaultSdk';
 import { usePlayer } from './context/PlayerContext';
 const GA_MEASUREMENT_ID = 'G-HBLXEBQB7H';
 
@@ -73,6 +74,7 @@ export default function App() {
         <Route path="/artist/:id" element={<Artist />} />
         <Route path="/profile/:address" element={<Profile />} />
         <Route path="/track/:txId" element={<TrackDetail />} />
+        <Route path="/sdk" element={<StreamVaultSdk />} />
         <Route path="/creator-tools" element={<Navigate to="/vault/creator-tools" replace />} />
         <Route path="/vault" element={<VaultLayout />}>
           <Route index element={<VaultTrending />} />
