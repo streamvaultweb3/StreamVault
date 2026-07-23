@@ -7,7 +7,10 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "build:sdk": "npm --prefix packages/streamvault-sdk run build",
+    "pack:sdk": "npm --cache /tmp/streamvault-npm-cache --prefix packages/streamvault-sdk run pack:local",
     "preview": "vite preview",
+    "sdk:demo": "vite --host 127.0.0.1 --open /sdk",
     "diag:ao": "node tools/ao-diagnostics.mjs",
     "diag:hb-query": "node tools/hb-query-parity.mjs",
     "diag:orderbook": "node tools/verify-orderbook.mjs",

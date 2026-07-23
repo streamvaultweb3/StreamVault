@@ -790,6 +790,118 @@ export async function getProfileOptionsByWallet(
   return Array.from(deduped.values()).sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
 }
 
+async function getProfileOptionsByHandle(
+  libs: any,
+  handle: string,
+  gateway = 'ao-search-gateway.goldsky.com'
+): Promise<ProfileOption[]> {
+  const username = String(handle || '').trim().replace(/^@+/, '');
+  if (!libs || !username) return [];
+  const activeLibs = shouldPreferFallbackReads() ? (getFallbackReadLibs() || libs) : libs;
+  const handleValues = Array.from(
+    new Set([
+      username,
+      username.toLowerCase(),
+      username.toUpperCase(),
+      `@${username}`,
+      `@${username.toLowerCase()}`,
+    ])
+  );
+  const handleTagNames = ['Bootloader-Username', 'Username', 'username', 'Handle', 'handle'];
+  const zoneTagSets = [
+    [
+      { name: 'Data-Protocol', values: ['ao'] },
+      { name: 'Zone-Type', values: ['User'] },
+    ],
+    [
+      { name: 'data-protocol', values: ['ao'] },
+      { name: 'zone-type', values: ['User'] },
+    ],
+  ];
+
+  const exactQueries = handleTagNames.flatMap((tagName) => {
+    const handleTag = { name: tagName, values: handleValues };
+    return [
+      activeLibs.getGQLData({
+        tags: [...zoneTagSets[0], handleTag],
+        gateway,
+      }),
+      activeLibs.getGQLData({
+        tags: [...zoneTagSets[1], handleTag],
+        gateway,
+      }),
+      activeLibs.getGQLData({
+        tags: [handleTag],
+        gateway,
+      }),
+    ];
+  });
+
+  const scanQueries = zoneTagSets.map((tags) =>
+    activeLibs.getGQLData({
+      tags,
+      gateway,
+    })
+  );
+
+  const results = await Promise.allSettled([...exactQueries, ...scanQueries]);
+  const rows = results.flatMap((result) => (result.status === 'fulfilled' ? result.value?.data || [] : []));
+  const deduped = new Map<string, ProfileOption>();
+  for (const entry of rows) {
+    const id = entry?.node?.id;
+    if (!id) continue;
+    const indexedHandle = getTagValue(entry.node.tags || [], [
+      'Bootloader-Username',
+      'Username',
+      'username',
+      'Handle',
+      'handle',
+    ]);
+    if (indexedHandle?.replace(/^@+/, '').toLowerCase() !== username.toLowerCase()) continue;
+    const profile = buildProfileFromSpawnIndex(
+      {
+        profileId: id,
+        walletAddress: null,
+        scheduler: getTagValue(entry.node.tags || [], ['Scheduler', 'Scheduler-Location', 'scheduler']),
+        displayName: getTagValue(entry.node.tags || [], ['Bootloader-DisplayName', 'Display-Name', 'DisplayName']),
+        username: getTagValue(entry.node.tags || [], ['Bootloader-Username', 'Username', 'username', 'Handle', 'handle']),
+        description: getTagValue(entry.node.tags || [], ['Bootloader-Description', 'Description', 'description']),
+        thumbnail: getTagValue(entry.node.tags || [], ['Bootloader-Thumbnail', 'Thumbnail', 'thumbnail', 'Avatar', 'avatar']),
+        banner: getTagValue(entry.node.tags || [], ['Bootloader-Banner', 'Banner', 'banner', 'Cover', 'cover']),
+      },
+      null
+    );
+    if (getProfileHandle(profile)?.toLowerCase() !== username.toLowerCase()) continue;
+    const timestamp = entry?.node?.block?.timestamp ? entry.node.block.timestamp * 1000 : undefined;
+    const current = deduped.get(id);
+    if (!current || (timestamp || 0) > (current.timestamp || 0)) {
+      deduped.set(id, { id, timestamp });
+    }
+  }
+  return Array.from(deduped.values()).sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+}
+
+export async function getProfileByHandleSafe(
+  libs: any,
+  handle: string,
+  opts?: { timeoutMs?: number; gateway?: string }
+): Promise<any | null> {
+  const username = String(handle || '').trim().replace(/^@+/, '');
+  if (!libs || !username) return null;
+  const options = await sortProfileOptionsForPortal(
+    await getProfileOptionsByHandle(libs, username, opts?.gateway)
+  );
+  for (const option of options.slice(0, 5)) {
+    const profile =
+      (await getProfileByIdSafe(libs, option.id, { timeoutMs: opts?.timeoutMs })) ||
+      (await readProfileFromSpawnIndex(option.id));
+    if (profile?.id && getProfileHandle(profile)?.replace(/^@+/, '').toLowerCase() === username.toLowerCase()) {
+      return profile;
+    }
+  }
+  return null;
+}
+
 /** Prefer Portal-scheduler zones (hydrate on hb.portalinto.com) over legacy app-1 spawns. */
 async function sortProfileOptionsForPortal(options: ProfileOption[]): Promise<ProfileOption[]> {
   const currentScheduler = resolveAoNode().scheduler;

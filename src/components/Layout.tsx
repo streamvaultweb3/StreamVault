@@ -989,6 +989,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
             </div>
             <Link to="/" className={styles.navLink} onClick={() => setMobileNavOpen(false)}>Discover</Link>
             <Link to="/vault" className={styles.navLink} onClick={() => setMobileNavOpen(false)}>Vault</Link>
+            <Link to="/sdk" className={styles.navLink} onClick={() => setMobileNavOpen(false)}>SDK</Link>
             {address && (
               <Link to={profileHref} className={styles.navLink} onClick={() => setMobileNavOpen(false)}>Profile</Link>
             )}
