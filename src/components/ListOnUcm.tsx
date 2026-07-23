@@ -14,12 +14,23 @@ import {
   getCachedAssetOrderbookId,
   extractOrderbookIdFromUcmMessage,
   markOrderbookSpawnedForAsset,
+  rememberAssetListingAttempt,
   rememberAssetOrderbookId,
 } from '../lib/ucmOrderbookCache';
 import {
   getDefaultUcmQuoteToken,
+  getUcmQuoteTokens,
+  getUcmQuoteToken,
+  rememberPreferredUcmQuoteTokenId,
+  resolveInitialUcmQuoteToken,
+  tokenDisplayToBaseUnits,
+  type UcmQuoteToken,
 } from '../lib/ucmTokens';
-import { fetchWalletListingsForAsset, type UcmActiveOrder } from '../lib/ucmMarketplace';
+import {
+  fetchWalletListingsForAsset,
+  isEscrowedUnreadOrderId,
+  type UcmActiveOrder,
+} from '../lib/ucmMarketplace';
 import { resolveCanonicalAtomicAssetId } from '../lib/ucmAssetResolve';
 import styles from './ListOnUcm.module.css';
 import { UcmMarketProcesses } from './UcmMarketProcesses';
@@ -27,6 +38,10 @@ import { UcmMarketProcesses } from './UcmMarketProcesses';
 export type ListOnUcmProps = {
   assetId: string;
   title?: string;
+  /** L1 spawn creator / tx owner — gates the panel on track pages. */
+  assetCreatorHint?: string | null;
+  /** Skip ownership gate (e.g. post-publish success where the publisher is always the owner). */
+  assumeOwner?: boolean;
   /** Pre-fill listing price (AR). */
   defaultPriceAr?: string;
   /** Pre-fill quantity; capped by wallet balance when known. */
@@ -41,6 +56,8 @@ export type ListOnUcmProps = {
 export function ListOnUcm({
   assetId,
   title,
+  assetCreatorHint,
+  assumeOwner = false,
   defaultPriceAr = '0.1',
   defaultQuantity = 1,
   singleCopy = false,
@@ -55,7 +72,13 @@ export function ListOnUcm({
   const [priceAr, setPriceAr] = useState(defaultPriceAr);
   const [quantity, setQuantity] = useState(String(defaultQuantity));
   const [balance, setBalance] = useState<number | null>(null);
+  const [balanceWallet, setBalanceWallet] = useState<number | null>(null);
+  const [balanceProfile, setBalanceProfile] = useState<number | null>(null);
   const [balanceInferred, setBalanceInferred] = useState(false);
+  const [balanceEmptyConfirmed, setBalanceEmptyConfirmed] = useState(false);
+  const [balanceEscrowed, setBalanceEscrowed] = useState(0);
+  const [balanceUncredited, setBalanceUncredited] = useState(0);
+  const [balanceTotalSupply, setBalanceTotalSupply] = useState<number | null>(null);
   const [balanceLoading, setBalanceLoading] = useState(false);
   const [status, setStatus] = useState<UcmListingStatus | null>(null);
   const [isListing, setIsListing] = useState(false);
@@ -68,13 +91,39 @@ export function ListOnUcm({
     getCachedAssetOrderbookId(assetId)
   );
   const [ucmAssetId, setUcmAssetId] = useState(assetId);
-  const selectedQuoteToken = useMemo(() => getDefaultUcmQuoteToken(), []);
+  const quoteTokens = useMemo(() => getUcmQuoteTokens(), []);
+  const [selectedQuoteToken, setSelectedQuoteToken] = useState<UcmQuoteToken>(() =>
+    resolveInitialUcmQuoteToken()
+  );
+
+  const handleQuoteTokenChange = useCallback((tokenId: string) => {
+    const next = getUcmQuoteToken(tokenId) || getDefaultUcmQuoteToken();
+    setSelectedQuoteToken(next);
+    rememberPreferredUcmQuoteTokenId(next.id);
+  }, []);
+
+  const canShowListingPanel = useMemo(() => {
+    if (assumeOwner) return true;
+    if (walletType !== 'arweave' || !address) return false;
+
+    const wallet = address.toLowerCase();
+    const creator = String(assetCreatorHint || '').trim().toLowerCase();
+    if (creator) return creator === wallet;
+
+    if (profileHasAsset) return true;
+    if (balance != null && balance > 0) return true;
+    return false;
+  }, [address, assetCreatorHint, assumeOwner, balance, profileHasAsset, walletType]);
 
   useEffect(() => {
     let cancelled = false;
-    void resolveCanonicalAtomicAssetId(assetId).then((id) => {
-      if (!cancelled) setUcmAssetId(id);
-    });
+    void resolveCanonicalAtomicAssetId(assetId)
+      .then((id) => {
+        if (!cancelled) setUcmAssetId(id);
+      })
+      .catch(() => {
+        if (!cancelled) setUcmAssetId(assetId);
+      });
     return () => {
       cancelled = true;
     };
@@ -96,7 +145,7 @@ export function ListOnUcm({
         assetId: ucmAssetId,
         walletAddress: address,
         profileId,
-        quoteTokenId: selectedQuoteToken.id,
+        // Show asks across all market tokens; listing form uses selectedQuoteToken.
         orderbookIdHint: knownOrderbookId,
       });
       setActiveOrders(orders);
@@ -108,7 +157,7 @@ export function ListOnUcm({
     } finally {
       setOrdersLoading(false);
     }
-  }, [address, knownOrderbookId, ucmAssetId, profileId, selectedQuoteToken.id, walletType]);
+  }, [address, knownOrderbookId, ucmAssetId, profileId, walletType]);
 
   useEffect(() => {
     let cancelled = false;
@@ -159,7 +208,13 @@ export function ListOnUcm({
     const refreshBalance = async () => {
       if (!ucmAssetId || !address || walletType !== 'arweave') {
         setBalance(null);
+        setBalanceWallet(null);
+        setBalanceProfile(null);
         setBalanceInferred(false);
+        setBalanceEmptyConfirmed(false);
+        setBalanceEscrowed(0);
+        setBalanceUncredited(0);
+        setBalanceTotalSupply(null);
         setBalanceLoading(false);
         return;
       }
@@ -168,13 +223,28 @@ export function ListOnUcm({
         assetId: ucmAssetId,
         walletAddress: address,
         profileId,
+        creatorHint: assetCreatorHint,
       }).catch(() => ({
         copies: 0,
+        walletCopies: 0,
+        profileCopies: 0,
         inferredFromCreator: false,
+        balancesEmptyConfirmed: false,
+        escrowedCopies: 0,
+        uncreditedCopies: 0,
+        totalSupply: undefined as number | undefined,
       }));
       if (cancelled) return;
       setBalance(result.copies);
+      setBalanceWallet(Math.max(0, Math.floor(result.walletCopies || 0)));
+      setBalanceProfile(Math.max(0, Math.floor(result.profileCopies || 0)));
       setBalanceInferred(result.inferredFromCreator);
+      setBalanceEmptyConfirmed(Boolean(result.balancesEmptyConfirmed));
+      setBalanceEscrowed(Math.max(0, Math.floor(result.escrowedCopies || 0)));
+      setBalanceUncredited(Math.max(0, Math.floor(result.uncreditedCopies || 0)));
+      setBalanceTotalSupply(
+        result.totalSupply != null && result.totalSupply > 0 ? result.totalSupply : null
+      );
       setBalanceLoading(false);
     };
 
@@ -189,7 +259,7 @@ export function ListOnUcm({
       cancelled = true;
       if (pollTimer) clearInterval(pollTimer);
     };
-  }, [address, ucmAssetId, profileId, selectedQuoteToken.id, walletType]);
+  }, [address, assetCreatorHint, ucmAssetId, profileId, selectedQuoteToken.id, walletType]);
 
   useEffect(() => {
     void refreshDedicatedOrderbook();
@@ -202,6 +272,15 @@ export function ListOnUcm({
   const handleCancel = useCallback(
     async (order: UcmActiveOrder) => {
       if (!address) return;
+      if (order.escrowedUnread || isEscrowedUnreadOrderId(order.orderId)) {
+        setStatus({
+          processing: false,
+          success: false,
+          message:
+            'Ask is not readable on the orderbook yet (copies are escrowed). Cancel is unavailable until the sell order appears — try Refresh, or check Bazar.',
+        });
+        return;
+      }
       setCancellingId(order.orderId);
       setStatus(null);
       try {
@@ -217,10 +296,16 @@ export function ListOnUcm({
         await refreshActiveOrders();
         const bal = await fetchSellerAssetBalance({ assetId, walletAddress: address, profileId }).catch(() => ({
           copies: 0,
+          walletCopies: 0,
+          profileCopies: 0,
           inferredFromCreator: false,
+          balancesEmptyConfirmed: false,
         }));
         setBalance(bal.copies);
+        setBalanceWallet(Math.max(0, Math.floor(bal.walletCopies || 0)));
+        setBalanceProfile(Math.max(0, Math.floor(bal.profileCopies || 0)));
         setBalanceInferred(bal.inferredFromCreator);
+        setBalanceEmptyConfirmed(Boolean(bal.balancesEmptyConfirmed));
         window.dispatchEvent(new Event('streamvault:marketplace-updated'));
       } catch (e: any) {
         setStatus({
@@ -275,7 +360,12 @@ export function ListOnUcm({
     });
     try {
       const qty = parsedQuantity;
-      if (maxQty != null && maxQty <= 0) {
+      const isOwner =
+        assumeOwner ||
+        (Boolean(assetCreatorHint) &&
+          Boolean(address) &&
+          String(assetCreatorHint).trim().toLowerCase() === address.toLowerCase());
+      if (maxQty != null && maxQty <= 0 && !isOwner) {
         throw new Error(
           'No confirmed copies on your wallet or profile zone. Transfer a copy to your wallet before listing.'
         );
@@ -286,6 +376,9 @@ export function ListOnUcm({
         profileId,
         profileHasAsset,
         isLegacyProfile,
+        orderbookIdHint: knownOrderbookId,
+        creatorHint: assetCreatorHint,
+        balancesEmptyConfirmed: balanceEmptyConfirmed || balanceInferred,
         quantity: qty,
         priceQuote: priceAr,
         quoteTokenId: selectedQuoteToken.id,
@@ -293,12 +386,87 @@ export function ListOnUcm({
       });
       setKnownOrderbookId(result.orderbookId);
       rememberAssetOrderbookId(ucmAssetId, result.orderbookId);
-      for (let i = 0; i < 5; i++) {
+      rememberAssetListingAttempt(ucmAssetId, {
+        orderbookId: result.orderbookId,
+        quoteTokenId: selectedQuoteToken.id,
+        quoteSymbol: selectedQuoteToken.symbol,
+        priceDisplay: String(priceAr || '').trim() || '—',
+        priceWinston: tokenDisplayToBaseUnits(String(priceAr || '0'), selectedQuoteToken.denomination),
+        quantity: String(qty),
+      });
+
+      // Refresh wallet / escrow breakdown after Transfer (ask-live or escrowed-unread).
+      const bal = await fetchSellerAssetBalance({
+        assetId: ucmAssetId,
+        walletAddress: address,
+        profileId,
+        creatorHint: assetCreatorHint,
+      }).catch(() => null);
+      if (bal) {
+        setBalance(bal.copies);
+        setBalanceWallet(Math.max(0, Math.floor(bal.walletCopies || 0)));
+        setBalanceProfile(Math.max(0, Math.floor(bal.profileCopies || 0)));
+        setBalanceInferred(bal.inferredFromCreator);
+        setBalanceEmptyConfirmed(Boolean(bal.balancesEmptyConfirmed));
+        setBalanceEscrowed(Math.max(0, Math.floor(bal.escrowedCopies || 0)));
+        setBalanceUncredited(Math.max(0, Math.floor(bal.uncreditedCopies || 0)));
+        setBalanceTotalSupply(
+          bal.totalSupply != null && bal.totalSupply > 0 ? bal.totalSupply : null
+        );
+      }
+
+      let foundAskDuringRefresh = result.askStatus === 'ask-live';
+      // Only poll listings when ask may still appear — skip long loops once escrowed-unread.
+      const refreshRounds =
+        result.askStatus === 'ask-live' ? 1 : result.askStatus === 'escrowed-unread' ? 2 : 4;
+      for (let i = 0; i < refreshRounds; i++) {
+        setStatus({
+          processing: true,
+          success: false,
+          message: `Refreshing your listings (${i + 1}/${refreshRounds})…`,
+        });
         await refreshActiveOrders();
-        if (i < 4) await new Promise((r) => setTimeout(r, 2000));
+        try {
+          const { orders } = await fetchWalletListingsForAsset({
+            assetId: ucmAssetId,
+            walletAddress: address,
+            profileId,
+            quoteTokenId: selectedQuoteToken.id,
+            orderbookIdHint: result.orderbookId,
+          });
+          if (orders.length > 0) foundAskDuringRefresh = true;
+        } catch {
+          // keep polling
+        }
+        if (foundAskDuringRefresh) break;
+        if (i < refreshRounds - 1) await new Promise((r) => setTimeout(r, 1500));
       }
       await refreshDedicatedOrderbook();
-      window.dispatchEvent(new Event('streamvault:marketplace-updated'));
+
+      if (foundAskDuringRefresh) {
+        setStatus({
+          processing: false,
+          success: true,
+          message:
+            `Ask live on UCM. On Bazar, open this asset and select ${selectedQuoteToken.symbol} as the market token.`,
+        });
+        window.dispatchEvent(new Event('streamvault:marketplace-updated'));
+      } else if (result.askStatus === 'escrowed-unread' || (bal?.escrowedCopies || 0) > 0) {
+        setStatus({
+          processing: false,
+          success: false,
+          message:
+            `Escrowed in orderbook — ask not readable yet. Your listings may catch up after Refresh, ` +
+            `or check Bazar with ${selectedQuoteToken.symbol}.`,
+        });
+      } else {
+        setStatus({
+          processing: false,
+          success: false,
+          message:
+            `Transfer submitted but UCM ask was not confirmed. Try Refresh listings or open Bazar with ${selectedQuoteToken.symbol}.`,
+        });
+      }
     } catch (e: any) {
       let confirmedRows: UcmActiveOrder[] = [];
       if (address && walletType === 'arweave') {
@@ -352,7 +520,9 @@ export function ListOnUcm({
     } finally {
       setIsListing(false);
     }
-  }, [address, assetId, ucmAssetId, connect, isLegacyProfile, maxQty, parsedQuantity, priceAr, profileHasAsset, profileId, refreshActiveOrders, selectedQuoteToken.id, walletType]);
+  }, [address, assetId, assetCreatorHint, assumeOwner, balanceEmptyConfirmed, balanceInferred, ucmAssetId, connect, isLegacyProfile, knownOrderbookId, maxQty, parsedQuantity, priceAr, profileHasAsset, profileId, refreshActiveOrders, refreshDedicatedOrderbook, selectedQuoteToken.id, selectedQuoteToken.symbol, walletType]);
+
+  if (!canShowListingPanel) return null;
 
   if (!ucmConfigured()) {
     return (
@@ -380,18 +550,77 @@ export function ListOnUcm({
 
       {!compact ? (
         <p className={styles.hint}>
-          Sell copies on UCM (wAR). First list spawns a dedicated orderbook + activity process for this asset.
+          Sell copies on UCM for any Bazar market token (wAR, PI, AO, USDA…). First list spawns a dedicated
+          orderbook + activity process for this asset. On Bazar, open the asset and select the same market
+          token to see your ask.
         </p>
       ) : null}
+
+      <p className={styles.alphaWarning}>
+        <strong>Alpha UCM listing.</strong> Listing may escrow your asset before the sell order is readable on
+        UCM/Bazar. Use low-value test assets, refresh after listing, and avoid listing anything you cannot
+        afford to have temporarily locked while orderbook state syncs.
+      </p>
 
       {balanceLoading ? (
         <p className={styles.balance}>Checking balance…</p>
       ) : balance != null ? (
-        <p className={styles.balance}>
-          Balance: <strong>{balance}</strong>
-          {balanceInferred ? <span className={styles.balanceNote}> (syncing)</span> : null}
-        </p>
+        <div className={styles.balance}>
+          <p className={styles.balance}>
+            Available to list: <strong>{balance}</strong>
+            {balanceInferred ? (
+              <span className={styles.balanceNote}>
+                {balanceEmptyConfirmed
+                  ? ' (not credited yet — List will Init/Mint)'
+                  : ' (syncing)'}
+              </span>
+            ) : null}
+          </p>
+          <p className={styles.balanceNote}>
+            Wallet: <strong>{balanceWallet ?? 0}</strong>
+            {profileId || (balanceProfile || 0) > 0 ? (
+              <>
+                {' '}
+                · Profile zone: <strong>{balanceProfile ?? 0}</strong>
+              </>
+            ) : null}
+          </p>
+          {balanceEscrowed > 0 ? (
+            <p className={styles.balanceNote}>
+              Listed / escrowed in orderbook: <strong>{balanceEscrowed}</strong>
+            </p>
+          ) : null}
+          {balanceTotalSupply != null ? (
+            <p className={styles.balanceNote}>
+              Edition size: <strong>{balanceTotalSupply}</strong>
+              {balanceUncredited > 0 ? (
+                <>
+                  {' '}
+                  · <strong>{balanceUncredited}</strong> never credited on-chain (Init/Mint only funded{' '}
+                  {(balanceTotalSupply || 0) - balanceUncredited})
+                </>
+              ) : null}
+            </p>
+          ) : null}
+        </div>
       ) : null}
+
+      <label className={styles.label}>
+        Market token
+        <select
+          className={styles.input}
+          value={selectedQuoteToken.id}
+          onChange={(e) => handleQuoteTokenChange(e.target.value)}
+          disabled={isListing || quoteTokens.length === 0}
+          aria-label="UCM market token"
+        >
+          {quoteTokens.map((token) => (
+            <option key={token.id} value={token.id}>
+              {token.symbol} — {token.name}
+            </option>
+          ))}
+        </select>
+      </label>
 
       <div className={compact ? styles.formRow : undefined}>
         <label className={styles.label}>
@@ -428,18 +657,29 @@ export function ListOnUcm({
         className={styles.listBtn}
         disabled={isListing}
         onClick={() => void handleList()}
+        aria-busy={isListing}
       >
+        {isListing ? <span className={styles.spinner} aria-hidden /> : null}
         {isListing
           ? 'Listing…'
           : canList
             ? parsedQuantity === 1
-              ? 'List on UCM'
-              : `List ${parsedQuantity} on UCM`
+              ? `List for ${selectedQuoteToken.symbol}`
+              : `List ${parsedQuantity} for ${selectedQuoteToken.symbol}`
             : 'Connect Wander to list'}
       </button>
 
       {status?.message ? (
-        <p className={status.success ? styles.success : styles.error}>{status.message}</p>
+        <p
+          className={`${styles.statusRow} ${
+            status.success ? styles.success : status.processing ? styles.status : styles.error
+          }`}
+          role={status.processing ? 'status' : undefined}
+          aria-live="polite"
+        >
+          {status.processing ? <span className={styles.statusSpinner} aria-hidden /> : null}
+          <span>{status.message}</span>
+        </p>
       ) : null}
 
       <div className={styles.links}>
@@ -464,17 +704,33 @@ export function ListOnUcm({
                 <li key={order.orderId} className={styles.activeItem}>
                   <div>
                     <strong>
-                      {order.priceDisplay} {order.quoteSymbol}
+                      {order.escrowedUnread
+                        ? order.priceDisplay === '—'
+                          ? `Escrowed · ${order.quantity}`
+                          : `${order.priceDisplay} ${order.quoteSymbol} · escrowed`
+                        : `${order.priceDisplay} ${order.quoteSymbol}`}
                     </strong>
-                    <span className={styles.activeQty}> · {order.quantity}</span>
+                    {!order.escrowedUnread ? (
+                      <span className={styles.activeQty}> · {order.quantity}</span>
+                    ) : (
+                      <span className={styles.activeQty}>
+                        {' '}
+                        · ask syncing on {order.orderbookId.slice(0, 8)}…
+                      </span>
+                    )}
                   </div>
                   <button
                     type="button"
                     className={styles.cancelBtn}
-                    disabled={Boolean(cancellingId)}
+                    disabled={Boolean(cancellingId) || Boolean(order.escrowedUnread)}
+                    title={
+                      order.escrowedUnread
+                        ? 'Cancel unavailable until the ask is readable on the orderbook'
+                        : undefined
+                    }
                     onClick={() => void handleCancel(order)}
                   >
-                    {cancellingId === order.orderId ? '…' : 'Cancel'}
+                    {cancellingId === order.orderId ? '…' : order.escrowedUnread ? 'Pending' : 'Cancel'}
                   </button>
                 </li>
               ))}

@@ -195,7 +195,7 @@ async function queryActivitySpawnsInBlock(blockHeight: number, first = 8): Promi
   return data?.transactions?.edges || [];
 }
 
-async function queryRecentActivitySpawns(first = 24): Promise<SpawnEdge[]> {
+async function queryRecentActivitySpawns(first = 80): Promise<SpawnEdge[]> {
   const data = await gqlQuery<{ transactions?: { edges?: SpawnEdge[] } }>(DISCOVER_BY_ASSET_QUERY, {
     first,
     tags: [ACTIVITY_PROCESS_TAG],

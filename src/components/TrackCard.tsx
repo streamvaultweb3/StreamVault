@@ -4,6 +4,7 @@ import type { Track } from '../context/PlayerContext';
 import { usePlayer } from '../context/PlayerContext';
 import { trackDetailPath } from '../lib/arweaveTxDetail';
 import { defaultArtistHrefForTrack } from '../lib/arweaveArtist';
+import { trackHasAtomicAsset } from '../lib/trackBadges';
 import { useArweaveMediaSources } from '../hooks/useArweaveMediaSources';
 import styles from './TrackCard.module.css';
 
@@ -16,6 +17,8 @@ interface TrackCardProps {
   titleHref?: string;
   footerContent?: ReactNode;
   showPermanentBadge?: boolean;
+  /** Force atomic tile styling; defaults to true when track.assetId is set. */
+  atomicAsset?: boolean;
 }
 
 function defaultTitleHref(track: Track): string | undefined {
@@ -30,12 +33,14 @@ export function TrackCard({
   titleHref,
   footerContent,
   showPermanentBadge = true,
+  atomicAsset,
 }: TrackCardProps) {
   const { play, pause, currentTrack, isPlaying } = usePlayer();
   const isCurrent = currentTrack?.id === track.id;
   const artistTo = artistHref ?? defaultArtistHrefForTrack(track) ?? `/artist/${track.artistId}`;
   const titleTo = titleHref ?? defaultTitleHref(track);
-  const { src: artworkSource, onError: onArtworkError } = useArweaveMediaSources(track.artwork || '');
+  const { src: artworkSource, onError: onArtworkError, onLoad: onArtworkLoad } = useArweaveMediaSources(track.artwork || '');
+  const isAtomic = atomicAsset ?? trackHasAtomicAsset(track);
 
   const handlePlay = () => {
     if (isCurrent && isPlaying) pause();
@@ -43,7 +48,15 @@ export function TrackCard({
   };
 
   return (
-    <div className={styles.card + ' glass'}>
+    <div
+      className={[
+        'glass',
+        styles.card,
+        isAtomic ? styles.cardAtomic : track.isPermanent ? styles.cardPermanent : '',
+      ]
+        .filter(Boolean)
+        .join(' ')}
+    >
       <button type="button" className={styles.coverWrap} onClick={handlePlay}>
         {artworkSource ? (
           <img
@@ -52,6 +65,7 @@ export function TrackCard({
             className={styles.cover}
             loading="lazy"
             onError={onArtworkError}
+            onLoad={onArtworkLoad}
           />
         ) : (
           <div className={styles.coverPlaceholder} aria-hidden="true" />

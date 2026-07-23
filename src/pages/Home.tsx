@@ -17,6 +17,7 @@ import {
 import type { Track } from '../context/PlayerContext';
 import { TrackCard } from '../components/TrackCard';
 import { UploadedTrackMeta } from '../components/UploadedTrackMeta';
+import { SourcePill } from '../components/SourcePill';
 import { LogoSpinner } from '../components/LogoSpinner';
 import styles from './Home.module.css';
 import { useWallet } from '../context/WalletContext';
@@ -32,7 +33,7 @@ import {
 } from '../lib/profileWrite';
 import { useApi } from '@arweave-wallet-kit/react';
 import { arweaveArtistPath, looksLikeWalletAddress } from '../lib/arweaveArtist';
-import { arweaveTxDataUrl } from '../lib/arweaveDataGateway';
+import { preferredArweaveStreamUrl } from '../lib/arweaveDataGateway';
 import { fetchTrendingTracks, fetchAtomicAssetMap, enrichTracksWithAtomicAssetIds } from '../lib/arweaveDiscovery';
 import { type UploadedTrackRecord, uploadedTrackCompactBadges } from '../lib/uploadedTracks';
 import { ATOMIC_ASSET_BADGE } from '../lib/trackBadges';
@@ -66,7 +67,7 @@ function arweaveTrackToUploadRecord(track: Track): UploadedTrackRecord {
       if (match) artworkTxId = match[0];
     } else if (track.artwork.length === 43) {
       artworkTxId = track.artwork;
-      artworkUrl = arweaveTxDataUrl(track.artwork);
+      artworkUrl = preferredArweaveStreamUrl(track.artwork);
     } else {
       artworkUrl = track.artwork;
     }
@@ -75,7 +76,8 @@ function arweaveTrackToUploadRecord(track: Track): UploadedTrackRecord {
     txId,
     title: track.title,
     artist: track.artist,
-    permawebUrl: arweaveTxDataUrl(txId),
+    permawebUrl: preferredArweaveStreamUrl(txId),
+    arioUrl: preferredArweaveStreamUrl(txId),
     createdAt: new Date(0).toISOString(),
     walletAddress:
       track.artistId && looksLikeWalletAddress(track.artistId) ? track.artistId : undefined,
@@ -413,7 +415,6 @@ export function Home() {
   return (
     <div className={styles.page}>
       <section className={styles.hero}>
-        <h1 className={styles.heroTitle}>StreamVault</h1>
         <p className={styles.heroSubtitle}>
           Connect Audius to import metadata, then upload audio + art to Arweave.
         </p>
@@ -482,20 +483,18 @@ export function Home() {
                   item.kind === 'arweave' && item.upload ? (
                     <div className={styles.discoverFooterStack}>
                       <div className={styles.discoverBadgeRow}>
-                        <span className={styles.sourcePill}>Arweave</span>
                         {uploadedTrackCompactBadges({
                           ...item.upload,
                           assetId: item.upload.assetId || item.track.assetId,
                         }).map((badge) => (
-                          <span key={badge} className={styles.sourcePill}>
-                            {badge}
-                          </span>
+                          <SourcePill key={badge} label={badge} />
                         ))}
+                        <SourcePill label="Arweave" />
                       </div>
                       <UploadedTrackMeta track={item.upload} compact hideBadges />
                     </div>
                   ) : (
-                    <span className={styles.sourcePill}>Audius</span>
+                    <SourcePill label="Audius" />
                   )
                 }
               />
@@ -508,7 +507,7 @@ export function Home() {
                 <div className={styles.audiusIntro}>
                   <h2 className={styles.sectionTitle}>Listed on UCM</h2>
                   <p className={styles.sectionSubtitle}>
-                    StreamVault atomic assets with active sell orders on the Universal Content Marketplace.
+                    StreamVault atomic assets with readable active sell orders on UCM.
                   </p>
                 </div>
               </div>
@@ -530,11 +529,17 @@ export function Home() {
                       footerContent={
                         <div className={styles.discoverFooterStack}>
                           <div className={styles.discoverBadgeRow}>
-                            <span className={styles.sourcePill}>
-                              {listing.priceDisplay} {listing.quoteSymbol}
-                            </span>
-                            <span className={styles.sourcePill}>{ATOMIC_ASSET_BADGE}</span>
-                            <span className={styles.sourcePill}>UCM</span>
+                            <SourcePill label={ATOMIC_ASSET_BADGE} />
+                            <SourcePill
+                              label={
+                                listing.escrowedUnread
+                                  ? listing.priceDisplay === '—'
+                                    ? 'Escrowed on UCM'
+                                    : `${listing.priceDisplay} ${listing.quoteSymbol} · syncing`
+                                  : `${listing.priceDisplay} ${listing.quoteSymbol}`
+                              }
+                            />
+                            <SourcePill label="UCM" />
                           </div>
                           <div className={styles.marketLinks}>
                             <Link to={trackDetailPath(listing.audioTxId)} className={styles.marketLink}>

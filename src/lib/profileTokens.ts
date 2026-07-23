@@ -111,28 +111,43 @@ function getAssetType(info: any): string | null {
   return value ? value : null;
 }
 
+function isMediaAssetType(assetType: string): boolean {
+  return (
+    /^(audio|image|video|model)\//i.test(assetType) ||
+    assetType === 'audio' ||
+    assetType === 'image' ||
+    assetType === 'video'
+  );
+}
+
 function getKind(info: any, ticker: string, denomination: number): 'ao-token' | 'atomic-asset' | 'unknown' {
   const metadata = pick(info, ['Metadata', 'metadata']) || {};
   const assetType = String(getAssetType(info) || '').toLowerCase();
   const metadataType = String(pick(metadata, ['Standard', 'standard']) || '').toLowerCase();
+  const tickerNorm = String(ticker || '').trim().toLowerCase();
 
-  const hasTokenSignals =
-    Boolean(ticker) ||
-    denomination > 0 ||
-    typeof pick(info, ['Balances', 'balances', 'TotalSupply', 'totalSupply']) !== 'undefined';
-
-  if (hasTokenSignals) return 'ao-token';
+  // Atomic assets (ANS-110 / Bazar music) often carry Denomination=1, Balances, and Ticker=ATOMIC.
+  // Those must not be treated as fungible AO tokens or they displace the tracks grid.
   if (
+    isMediaAssetType(assetType) ||
     assetType.includes('atomic') ||
     assetType.includes('collectible') ||
     assetType.includes('nft') ||
-    metadataType.includes('ans-110')
+    metadataType.includes('ans-110') ||
+    tickerNorm === 'atomic'
   ) {
     return 'atomic-asset';
   }
-  if (typeof pick(info, ['contentType', 'Content-Type', 'Topics', 'topics', 'Data']) !== 'undefined') {
+  if (pick(info, ['contentType', 'Content-Type', 'Topics', 'topics', 'Data']) != null) {
     return 'atomic-asset';
   }
+
+  const hasFungibleTokenSignals =
+    (Boolean(tickerNorm) && tickerNorm !== 'atomic') ||
+    denomination > 1 ||
+    pick(info, ['TotalSupply', 'totalSupply']) != null;
+
+  if (hasFungibleTokenSignals) return 'ao-token';
   return 'unknown';
 }
 

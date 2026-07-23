@@ -3,12 +3,13 @@
  * Bazar: libs.readState({ processId: orderbookId, path: 'orderbook' }) → nested orderbook.Orderbook / Pair / Asks.
  */
 import { connect } from '@permaweb/aoconnect';
-import { resolveAoNode, resolveHbReadNodeUrls, BAZAR_HB_NODE } from './aoNode';
+import { resolveAoNode, resolveHbReadNodeUrls } from './aoNode';
 import {
   HB_READ_HEADERS,
   hbRequest,
   isHyperbeamReadFailure,
 } from './hbNode';
+import { resolveHbReadNodeUrlsForProcess } from './hbScheduler';
 import { DEFAULT_WAR_TOKEN_ID, getUcmQuoteToken, tokenBaseUnitsToDisplay } from './ucmTokens';
 
 export type ParsedUcmAsk = {
@@ -39,6 +40,10 @@ type RawUcmOrder = {
 
 function pickString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+export function isValidAoProcessId(value: unknown): value is string {
+  return typeof value === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value.trim());
 }
 
 function normalizeAddr(addr: string | undefined | null): string {
@@ -101,6 +106,9 @@ export function hasOrderbookPayload(json: unknown): boolean {
   return Boolean(
     row.ActivityProcess ||
       row.activityProcess ||
+      row.ACTIVITY_PROCESS ||
+      row.Activity_Process ||
+      row['Activity-Process'] ||
       row.Orderbook ||
       row.orderbook ||
       row.Asks ||
@@ -129,7 +137,70 @@ function isHbExecutionFailure(json: unknown): boolean {
   return false;
 }
 
+/** Parse JSON Info payload from an AO message Data field (string or object). */
+function parseMessageDataPayload(data: unknown): Record<string, unknown> | null {
+  if (data == null) return null;
+  if (typeof data === 'object' && !Array.isArray(data)) {
+    return data as Record<string, unknown>;
+  }
+  if (typeof data !== 'string' || !data.trim()) return null;
+  try {
+    const parsed = JSON.parse(data);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * HB Info POST puts Action=Info output in results.outbox / results.raw.Messages,
+ * not as top-level Orderbook keys. Without this unwrap, reads fall through to slow
+ * compute/dryrun paths and listing UI times out even when Bazar answered in ~1s.
+ */
+function extractInfoPayloadFromHbExecution(
+  json: Record<string, unknown>
+): Record<string, unknown> | null {
+  const results = json.results;
+  if (results && typeof results === 'object' && !Array.isArray(results)) {
+    const row = results as Record<string, unknown>;
+    const outbox = row.outbox;
+    if (outbox && typeof outbox === 'object' && !Array.isArray(outbox)) {
+      for (const [key, entry] of Object.entries(outbox as Record<string, unknown>)) {
+        if (key === 'commitments' || !entry || typeof entry !== 'object') continue;
+        const payload = parseMessageDataPayload((entry as Record<string, unknown>).Data);
+        if (payload && hasOrderbookPayload(payload)) return payload;
+      }
+    }
+    const raw = row.raw;
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      const messages = (raw as Record<string, unknown>).Messages;
+      if (Array.isArray(messages)) {
+        for (const msg of messages) {
+          if (!msg || typeof msg !== 'object') continue;
+          const payload = parseMessageDataPayload((msg as Record<string, unknown>).Data);
+          if (payload && hasOrderbookPayload(payload)) return payload;
+        }
+      }
+    }
+  }
+
+  const topMessages = json.Messages;
+  if (Array.isArray(topMessages) && topMessages[0] && typeof topMessages[0] === 'object') {
+    const payload = parseMessageDataPayload((topMessages[0] as Record<string, unknown>).Data);
+    if (payload && hasOrderbookPayload(payload)) return payload;
+  }
+
+  return null;
+}
+
 function parseOrderbookInfoFromHbExecution(json: Record<string, unknown>): Record<string, unknown> | null {
+  const fromOutbox = extractInfoPayloadFromHbExecution(json);
+  if (fromOutbox) {
+    const normalized = normalizeUcmOrderbookInfo(fromOutbox);
+    if (normalized && hasOrderbookPayload(normalized)) return normalized;
+  }
   const fromCompute = extractOrderbookFromCompute(json);
   if (fromCompute && hasOrderbookPayload(fromCompute)) return fromCompute;
   const normalized = normalizeUcmOrderbookInfo(json);
@@ -140,7 +211,15 @@ function parseOrderbookInfoFromHbExecution(json: Record<string, unknown>): Recor
 export function readActivityProcessId(info: Record<string, unknown> | null | undefined): string | null {
   const row = normalizeUcmOrderbookInfo(info);
   if (!row) return null;
-  return pickString(row.ActivityProcess) || pickString(row.activityProcess) || null;
+  // createOrderbook Eval sets ACTIVITY_PROCESS; Info / HB may expose several casings.
+  const candidate =
+    pickString(row.ActivityProcess) ||
+    pickString(row.activityProcess) ||
+    pickString(row.ACTIVITY_PROCESS) ||
+    pickString(row.Activity_Process) ||
+    pickString(row['Activity-Process']) ||
+    null;
+  return isValidAoProcessId(candidate) ? candidate : null;
 }
 
 export type OrderbookPairSummary = {
@@ -162,7 +241,8 @@ export function summarizeOrderbookPairs(
     const pair = pairRow.Pair ?? pairRow.pair;
     if (!Array.isArray(pair) || typeof pair[0] !== 'string' || typeof pair[1] !== 'string') return;
     if (pair[0] !== assetId) return;
-    const asks = pairRow.Asks ?? pairRow.asks;
+    // Newer UCM uses Asks/Bids; older boot scripts use Orders for the sell side.
+    const asks = pairRow.Asks ?? pairRow.asks ?? pairRow.Orders ?? pairRow.orders;
     const bids = pairRow.Bids ?? pairRow.bids;
     rows.push({
       base: pair[0],
@@ -183,27 +263,43 @@ export function summarizeOrderbookPairs(
   return rows;
 }
 
-async function dryrunOrderbookInfo(orderbookId: string): Promise<Record<string, unknown> | null> {
+async function dryrunOrderbookInfo(
+  orderbookId: string,
+  readNodeUrls: string[]
+): Promise<Record<string, unknown> | null> {
   if (!orderbookId.trim()) return null;
-  try {
-    const node = resolveAoNode();
-    const ao = connect({
-      MODE: 'mainnet',
-      URL: node.url,
-      SCHEDULER: node.scheduler,
-    } as any);
-    const res: any = await ao.dryrun({
-      process: orderbookId,
-      tags: [{ name: 'Action', value: 'Info' }],
-    });
-    return normalizeUcmOrderbookInfo(parseInfoData(res?.Messages?.[0]));
-  } catch {
-    return null;
+  const node = resolveAoNode();
+  // Prefer scheduler-aware / Bazar-first read URL — never pin dryrun to Portal-only.
+  // Cap peers + timeout: Portal Info is often CORS-blocked from localhost and burns listing UX.
+  for (const url of readNodeUrls.slice(0, 2)) {
+    try {
+      const ao = connect({
+        MODE: 'mainnet',
+        URL: url,
+        SCHEDULER: node.scheduler,
+      } as any);
+      const res: any = await Promise.race([
+        ao.dryrun({
+          process: orderbookId,
+          tags: [{ name: 'Action', value: 'Info' }],
+        }),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 2_500)),
+      ]);
+      if (!res) continue;
+      const normalized = normalizeUcmOrderbookInfo(parseInfoData(res?.Messages?.[0]));
+      if (normalized && hasOrderbookPayload(normalized)) return normalized;
+    } catch {
+      // try next read node
+    }
   }
+  return null;
 }
 
-async function readOrderbookInfoPost(orderbookId: string): Promise<Record<string, unknown> | null> {
-  for (const nodeBase of resolveHbReadNodeUrls()) {
+async function readOrderbookInfoPost(
+  orderbookId: string,
+  readNodeUrls: string[]
+): Promise<Record<string, unknown> | null> {
+  for (const nodeBase of readNodeUrls) {
     try {
       const base = nodeBase.replace(/\/+$/, '');
       const url = `${base}/${orderbookId}~process@1.0/as=execution/compute&Action=Info`;
@@ -212,7 +308,10 @@ async function readOrderbookInfoPost(orderbookId: string): Promise<Record<string
         url,
         method: 'POST',
         headers: HB_READ_HEADERS,
+        timeoutMs: 6_000,
       });
+      // Fail fast on 500 (foreign schedule on operator) — do not keep probing the same peer.
+      if (!res.ok || res.status >= 500) continue;
       if (!res.json || isHyperbeamReadFailure(res.json, res.text) || isHbExecutionFailure(res.json)) {
         continue;
       }
@@ -239,25 +338,26 @@ export async function readDedicatedOrderbookInfo(
 }
 
 /** Same as readDedicatedOrderbookInfo but includes which read path succeeded (for debugging). */
-const ORDERBOOK_READ_TIMEOUT_MS = 14_000;
+const ORDERBOOK_READ_TIMEOUT_MS = 10_000;
 
 async function readDedicatedOrderbookInfoDetailedInner(
   orderbookId: string
 ): Promise<DedicatedOrderbookRead> {
   if (!orderbookId.trim()) return { info: null, source: 'none' };
 
-  const fromDryrun = await dryrunOrderbookInfo(orderbookId);
-  if (fromDryrun) return { info: fromDryrun, source: 'dryrun' };
+  // Scheduler-aware (operator only when spawn matches). Default list is Bazar-first — no nyc spam.
+  const readNodeUrls = await resolveHbReadNodeUrlsForProcess(orderbookId).catch(() =>
+    resolveHbReadNodeUrls()
+  );
+  // Cap peers so a slow Portal/CORS dryrun cannot dominate listing confirm.
+  const peers = readNodeUrls.slice(0, 2);
 
-  const fromPost = await readOrderbookInfoPost(orderbookId);
+  // HB compute/Info first (scheduler-aware) — dryrun used to pin Portal and stall UCM UI.
+  const fromPost = await readOrderbookInfoPost(orderbookId, peers);
   if (fromPost) return { info: fromPost, source: 'hb-info-post' };
 
-  for (const subpath of ['compute', 'now'] as const) {
-    const nodeBases = [
-      BAZAR_HB_NODE,
-      ...resolveHbReadNodeUrls().filter((url) => url.replace(/\/+$/, '') !== BAZAR_HB_NODE.replace(/\/+$/, '')),
-    ];
-    for (const nodeBase of nodeBases) {
+  for (const subpath of ['compute/orderbook', 'now/orderbook', 'compute', 'now'] as const) {
+    for (const nodeBase of peers) {
       const base = nodeBase.replace(/\/+$/, '');
       const url = `${base}/${orderbookId}~process@1.0/${subpath}`;
       try {
@@ -266,17 +366,26 @@ async function readDedicatedOrderbookInfoDetailedInner(
           url,
           method: 'GET',
           headers: HB_READ_HEADERS,
+          timeoutMs: 6_000,
         });
+        if (!res.ok || res.status >= 500) continue;
         if (!res.json || isHyperbeamReadFailure(res.json, res.text)) continue;
         const normalized = extractOrderbookFromCompute(res.json as Record<string, unknown>);
         if (normalized) {
-          return { info: normalized, source: subpath === 'now' ? 'hb-now' : 'hb-compute' };
+          return {
+            info: normalized,
+            source: subpath.startsWith('now') ? 'hb-now' : 'hb-compute',
+          };
         }
       } catch {
         // try next node
       }
     }
   }
+
+  // Dryrun last — Portal Info is often CORS-blocked from localhost; keep short.
+  const fromDryrun = await dryrunOrderbookInfo(orderbookId, peers);
+  if (fromDryrun) return { info: fromDryrun, source: 'dryrun' };
 
   return { info: null, source: 'none' };
 }

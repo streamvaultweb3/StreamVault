@@ -19,7 +19,6 @@ import type { Track } from '../context/PlayerContext';
 import type { RegisteredTrackRecord } from './aoMusicRegistry';
 import { searchTracksOnAO } from './aoMusicRegistry';
 import {
-  arweaveTxDataUrl,
   fetchArweaveL1Graphql,
   preferredArweaveStreamUrl,
 } from './arweaveDataGateway';
@@ -82,7 +81,8 @@ function nodeToUploadedTrack(node: AudioTxNode): UploadedTrackRecord {
     txId,
     title,
     artist,
-    permawebUrl: arweaveTxDataUrl(txId),
+    permawebUrl: preferredArweaveStreamUrl(txId),
+    arioUrl: preferredArweaveStreamUrl(txId),
     createdAt: node.block?.timestamp
       ? new Date(node.block.timestamp * 1000).toISOString()
       : new Date(0).toISOString(),
@@ -310,31 +310,35 @@ export async function findAtomicAssetIdForAudioTx(audioTxId: string): Promise<st
   const txId = String(audioTxId || '').trim();
   if (!txId) return null;
 
-  try {
-    const json = await fetchArweaveL1Graphql({
-      query: ASSET_BY_AUDIO_QUERY,
-      variables: {
-        first: 10,
-        tags: [
-          { name: 'Track-AudioTx', values: [txId] },
-          { name: 'App-Name', values: ['StreamVault'] },
-        ],
-      },
-    });
-    const edges = json?.data?.transactions?.edges ?? [];
-    for (const edge of edges) {
-      const node = edge?.node;
-      const id = String(node?.id || '').trim();
-      if (!id) continue;
-      if (id === txId) return id;
-      const tags = Array.isArray(node?.tags) ? node.tags : [];
-      const hasAudioTag = tags.some(
-        (tag: any) => String(tag?.name || '') === 'Track-AudioTx' && String(tag?.value || '') === txId
-      );
-      if (hasAudioTag) return id;
+  const tagSets: Array<Array<{ name: string; values: string[] }>> = [
+    [
+      { name: 'Track-AudioTx', values: [txId] },
+      { name: 'App-Name', values: ['StreamVault'] },
+    ],
+    [
+      { name: 'Track-AudioTx', values: [txId] },
+      { name: 'Data-Protocol', values: ['ao'] },
+      { name: 'Type', values: ['Process'] },
+    ],
+    [{ name: 'Bootloader-AudioTxId', values: [txId] }],
+  ];
+
+  for (const tags of tagSets) {
+    try {
+      const json = await fetchArweaveL1Graphql({
+        query: ASSET_BY_AUDIO_QUERY,
+        variables: { first: 10, tags },
+      });
+      const edges = json?.data?.transactions?.edges ?? [];
+      for (const edge of edges) {
+        const node = edge?.node;
+        const id = String(node?.id || '').trim();
+        if (!id || id === txId) continue;
+        return id;
+      }
+    } catch {
+      // try next tag set
     }
-  } catch {
-    // ignore
   }
   return null;
 }
@@ -500,7 +504,8 @@ function trackToUploadRecord(track: Track): UploadedTrackRecord {
     txId,
     title: track.title,
     artist: track.artist,
-    permawebUrl: arweaveTxDataUrl(txId),
+    permawebUrl: preferredArweaveStreamUrl(txId),
+    arioUrl: preferredArweaveStreamUrl(txId),
     createdAt: new Date(0).toISOString(),
     walletAddress: track.artistId,
     assetId: track.assetId,

@@ -12,15 +12,22 @@
 
 import type { PublishResult } from '../lib/arweave';
 import {
+  ARWEAVE_DATA_GATEWAY_BASE,
+  ARWEAVE_RELIABLE_DATA_GATEWAY_BASES,
   arweaveDataGatewayHost,
   arweaveTxDataUrl,
-  arweaveTxDataUrls,
   arweaveTxStatusUrls,
+  isArweaveSandboxGatewayUrl,
+  normalizeArweaveTxId,
   turboTxDataUrl,
+  TURBO_PUBLIC_DATA_GATEWAY_BASE,
 } from './arweaveDataGateway';
 import type { UdlConfig, RoyaltySplit } from './udl';
 import { udlConfigToTags } from './udl';
 import { registerTrackOnAO } from './aoMusicRegistry';
+import { withResilientGlobalFetch } from './aoFetch';
+import { resolveAoNode, resolveHbWriteNodeUrls } from './aoNode';
+import { findAtomicAssetIdForAudioTx, fetchAtomicAssetMap } from './arweaveDiscovery';
 
 /**
  * ANS-104 allows repeated tag names, but many gateways / GraphQL indexers assume
@@ -74,9 +81,175 @@ interface PermawebLibs {
     data: string;
     contentType: string;
     assetType: string;
+    supply?: number;
+    denomination?: number;
+    transferable?: boolean;
     metadata?: Record<string, unknown>;
     tags?: { name: string; value: string }[];
   }) => Promise<string>;
+}
+
+/**
+ * @permaweb/libs createAtomicAsset stringifies every metadata value via `.toString()`.
+ * Undefined entries (e.g. `artwork: undefined`) throw; objects become `[object Object]`.
+ * Only emit defined, string-serializable fields.
+ */
+function sanitizeAtomicAssetMetadata(
+  metadata: Record<string, unknown>
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(metadata)) {
+    if (value === undefined || value === null) continue;
+    if (typeof value === 'string') {
+      if (value.trim()) out[key] = value;
+      continue;
+    }
+    if (typeof value === 'number' || typeof value === 'boolean') {
+      out[key] = String(value);
+      continue;
+    }
+    try {
+      out[key] = JSON.stringify(value);
+    } catch {
+      console.warn('[publish] Skipping non-serializable atomic metadata field', key);
+    }
+  }
+  return out;
+}
+
+function extractAtomicAssetErrorDetail(error: unknown, depth = 0): string {
+  if (!error || depth > 4) return '';
+  if (typeof error === 'string') return error.trim();
+  const e = error as Record<string, unknown>;
+  const parts: string[] = [];
+  const msg = String(e.message || '').trim();
+  if (msg && msg !== 'Error spawning process' && msg !== 'Error creating asset') parts.push(msg);
+  if (typeof e.status === 'number') parts.push(`HTTP ${e.status}`);
+  if (typeof e.statusText === 'string' && e.statusText.trim()) parts.push(e.statusText.trim());
+  if (typeof e.info === 'string' && e.info.trim()) parts.push(e.info.trim());
+  if (typeof e.responseBody === 'string' && e.responseBody.trim()) {
+    parts.push(e.responseBody.trim().slice(0, 240));
+  }
+  const cause = extractAtomicAssetErrorDetail(e.cause, depth + 1);
+  if (cause) parts.push(cause);
+  return parts.join(' — ');
+}
+
+function describeAtomicAssetError(error: unknown): string {
+  const raw = String((error as { message?: string })?.message || error || '').trim();
+  const detail = extractAtomicAssetErrorDetail(error);
+  if (/Cannot read properties of undefined \(reading 'toString'\)/i.test(raw) || /undefined.*toString/i.test(raw)) {
+    return 'Atomic asset mint failed: a metadata field was undefined. @permaweb/libs calls .toString() on every metadata value — omit empty optional fields (artwork, royalties, etc.).';
+  }
+  if (/HTTP request failed/i.test(raw) || raw === 'Error spawning process' || raw === 'Error creating asset') {
+    const writeUrl = resolveHbWriteNodeUrls()[0] || resolveAoNode().url;
+    const networkHint =
+      /failed to fetch|network|ERR_CONNECTION|timed out|timeout|connection closed|connection refused/i.test(
+        `${raw} ${detail}`
+      )
+        ? ' Network/VPN may be blocking or slowing HyperBEAM (Portal). Try toggling VPN or retry in a minute.'
+        : '';
+    const hint =
+      detail ||
+      `AO spawn POST to ${writeUrl}/push failed (check portal reachability, VITE_AO_WRITE_URL, scheduler, authority).`;
+    return `Atomic asset mint failed: ${raw || 'spawn error'} — ${hint}${networkHint}`;
+  }
+  if (detail && detail !== raw) {
+    return `Atomic asset mint failed: ${raw || 'spawn error'} (${detail})`;
+  }
+  if (!raw) return 'Atomic asset mint failed.';
+  return `Atomic asset mint failed: ${raw}`;
+}
+
+type PublishAtomicContext = {
+  libs: PermawebLibs | null;
+  getWritableLibs?: (options?: {
+    url?: string;
+    scheduler?: string;
+    authority?: string;
+    mode?: 'mainnet' | 'legacy';
+  }) => Promise<PermawebLibs | null>;
+};
+
+type WritablePermawebLibs = PermawebLibs & {
+  createAtomicAsset: NonNullable<PermawebLibs['createAtomicAsset']>;
+};
+
+function isTransientAtomicMintError(error: unknown): boolean {
+  const raw = `${String((error as { message?: string })?.message || error || '')} ${extractAtomicAssetErrorDetail(error)}`;
+  return /HTTP request failed|Error sending message|Error spawning process|Error creating asset|timed out|timeout|failed to fetch|network|ERR_CONNECTION|abort/i.test(
+    raw
+  );
+}
+
+/**
+ * HyperBEAM spawn often finishes after the browser request times out.
+ * Poll L1 GraphQL for Track-AudioTx → process id so the UI can confirm success.
+ */
+async function waitForIndexedAtomicAsset(args: {
+  audioTxId: string;
+  creatorAddress?: string | null;
+  timeoutMs?: number;
+  onTick?: (elapsedMs: number) => void;
+}): Promise<string | null> {
+  const audioTxId = String(args.audioTxId || '').trim();
+  if (!audioTxId) return null;
+  const timeoutMs = Math.max(30_000, args.timeoutMs ?? 180_000);
+  const start = Date.now();
+  let delayMs = 4_000;
+
+  while (Date.now() - start < timeoutMs) {
+    args.onTick?.(Date.now() - start);
+    try {
+      const fromTag = await findAtomicAssetIdForAudioTx(audioTxId);
+      if (fromTag && fromTag !== audioTxId) return fromTag;
+    } catch {
+      // keep polling
+    }
+    try {
+      const map = await fetchAtomicAssetMap({
+        creator: args.creatorAddress || null,
+        limit: 50,
+      });
+      const fromMap = map.get(audioTxId);
+      if (fromMap && fromMap !== audioTxId) return fromMap;
+    } catch {
+      // keep polling
+    }
+    await new Promise((r) => setTimeout(r, delayMs));
+    delayMs = Math.min(15_000, Math.floor(delayMs * 1.35));
+  }
+  return null;
+}
+
+async function resolveAtomicMintLibs(
+  ctx: PublishAtomicContext
+): Promise<WritablePermawebLibs | null> {
+  const fallback = ctx.libs?.createAtomicAsset ? (ctx.libs as WritablePermawebLibs) : null;
+  if (!ctx.getWritableLibs) return fallback;
+
+  const writeUrl = resolveHbWriteNodeUrls()[0] || resolveAoNode().url;
+  const node = resolveAoNode();
+  try {
+    const writable = await ctx.getWritableLibs({
+      url: writeUrl,
+      scheduler: node.scheduler,
+      authority: node.authority,
+      mode: 'mainnet',
+    });
+    if (writable?.createAtomicAsset) {
+      console.info('[publish] Atomic mint using Portal write libs', {
+        writeUrl,
+        scheduler: node.scheduler,
+        // Full id — earlier logs sliced to 12 chars and looked "too short".
+        authority: node.authority,
+      });
+      return writable as WritablePermawebLibs;
+    }
+  } catch (e) {
+    console.warn('[publish] getWritableLibs for atomic mint failed; falling back to default libs', e);
+  }
+  return fallback;
 }
 
 type TurboPaymentToken = 'arweave' | 'ethereum' | 'base-eth' | 'solana' | 'base-usdc' | 'base-ario' | 'polygon-usdc' | 'pol';
@@ -195,7 +368,9 @@ async function uploadArtworkWithTurbo(args: {
     paymentToken: args.paymentToken,
     onProgress: args.onProgress,
   });
-  const gatewayReady = await waitForGatewayImageReady(txId, contentType, 120_000).catch(() => false);
+  const gatewayReady = await waitForGatewayImageReady(txId, contentType, 120_000, {
+    preferTurbo: true,
+  }).catch(() => false);
   return {
     txId,
     permawebUrl: arweaveTxDataUrl(txId),
@@ -315,6 +490,9 @@ async function waitForConfirmation(txId: string, timeoutMs = 90_000): Promise<bo
           cache: 'no-store',
         });
         if (res.status === 200) return true;
+        if (res.status === 429) {
+          await new Promise((r) => setTimeout(r, 5_000));
+        }
       } catch {
         // ignore and try next gateway
       }
@@ -324,76 +502,154 @@ async function waitForConfirmation(txId: string, timeoutMs = 90_000): Promise<bo
   return false;
 }
 
-async function isGatewayAudioReady(txId: string, expectedContentType?: string): Promise<boolean> {
-  for (const url of arweaveTxDataUrls(txId)) {
-    try {
-      const res = await fetch(url, {
-        method: 'GET',
-        headers: { Range: 'bytes=0-1' },
-        cache: 'no-store',
-      });
-      if (!(res.status === 200 || res.status === 206)) continue;
-      const contentType = (res.headers.get('content-type') || '').toLowerCase();
-      if (expectedContentType && contentType && !contentType.includes(expectedContentType.toLowerCase().split(';')[0])) {
-        continue;
-      }
-      if (contentType.startsWith('audio/') || contentType.includes('mpeg') || contentType.includes('mp3')) {
-        return true;
-      }
-    } catch {
-      // ignore and try next gateway
-    }
+/**
+ * Ordered gateways for post-upload audio/image availability probes.
+ * Prefer `arweave.net` + ardrive/g8way first — turbo-gateway.com / akrd.net often
+ * ERR_CONNECTION_REFUSED under VPN even when Turbo upload itself succeeded.
+ */
+function gatewayReadyProbeUrls(txId: string, preferTurbo: boolean): string[] {
+  const id = normalizeArweaveTxId(txId);
+  const bases: string[] = [];
+  const push = (base: string) => {
+    if (!bases.includes(base)) bases.push(base);
+  };
+  push(ARWEAVE_DATA_GATEWAY_BASE);
+  for (const base of ARWEAVE_RELIABLE_DATA_GATEWAY_BASES) {
+    if (base.includes('turbo-gateway.com') || base.includes('akrd.net')) continue;
+    push(base);
   }
-  return false;
+  if (preferTurbo) push(TURBO_PUBLIC_DATA_GATEWAY_BASE);
+  push('https://akrd.net');
+  return bases.map((base) => `${base}/${id}`);
+}
+
+type GatewayProbeResult = 'ready' | 'not-ready' | 'rate-limited' | 'error';
+
+async function probeGatewayMediaReady(
+  url: string,
+  kind: 'audio' | 'image',
+  expectedContentType?: string
+): Promise<GatewayProbeResult> {
+  try {
+    // Don't follow arweave.net → sandbox subdomain redirects (those 429 without VPN).
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: { Range: 'bytes=0-1' },
+      cache: 'no-store',
+      redirect: 'manual',
+    });
+    if (res.status >= 300 && res.status < 400) {
+      const location = res.headers.get('Location') || res.headers.get('location') || '';
+      if (!location || isArweaveSandboxGatewayUrl(location)) return 'rate-limited';
+      try {
+        const next = await fetch(new URL(location, url).toString(), {
+          method: 'GET',
+          headers: { Range: 'bytes=0-1' },
+          cache: 'no-store',
+          redirect: 'manual',
+        });
+        if (next.status === 429) return 'rate-limited';
+        if (!(next.status === 200 || next.status === 206)) return 'not-ready';
+        const contentType = (next.headers.get('content-type') || '').toLowerCase();
+        if (kind === 'audio') {
+          if (contentType.startsWith('audio/') || contentType.includes('mpeg') || contentType.includes('mp3')) {
+            return 'ready';
+          }
+          return 'not-ready';
+        }
+        if (contentType.startsWith('image/')) return 'ready';
+        return 'not-ready';
+      } catch {
+        return 'error';
+      }
+    }
+    if (res.status === 429) return 'rate-limited';
+    if (!(res.status === 200 || res.status === 206)) return 'not-ready';
+    const contentType = (res.headers.get('content-type') || '').toLowerCase();
+    if (expectedContentType && contentType && !contentType.includes(expectedContentType.toLowerCase().split(';')[0])) {
+      return 'not-ready';
+    }
+    if (kind === 'audio') {
+      if (contentType.startsWith('audio/') || contentType.includes('mpeg') || contentType.includes('mp3')) {
+        return 'ready';
+      }
+      return 'not-ready';
+    }
+    if (contentType.startsWith('image/')) return 'ready';
+    return 'not-ready';
+  } catch {
+    return 'error';
+  }
+}
+
+async function isGatewayAudioReady(
+  txId: string,
+  expectedContentType?: string,
+  opts?: { preferTurbo?: boolean }
+): Promise<{ ready: boolean; rateLimited: boolean }> {
+  let rateLimited = false;
+  for (const url of gatewayReadyProbeUrls(txId, !!opts?.preferTurbo)) {
+    const result = await probeGatewayMediaReady(url, 'audio', expectedContentType);
+    if (result === 'ready') return { ready: true, rateLimited };
+    if (result === 'rate-limited') rateLimited = true;
+  }
+  return { ready: false, rateLimited };
 }
 
 async function waitForGatewayAudioReady(
   txId: string,
   expectedContentType: string,
-  timeoutMs = 120_000
+  timeoutMs = 120_000,
+  opts?: { preferTurbo?: boolean }
 ): Promise<boolean> {
   const start = Date.now();
+  let attempt = 0;
   while (Date.now() - start < timeoutMs) {
-    const ready = await isGatewayAudioReady(txId, expectedContentType);
+    const { ready, rateLimited } = await isGatewayAudioReady(txId, expectedContentType, opts);
     if (ready) return true;
-    await new Promise((r) => setTimeout(r, 3_000));
+    attempt += 1;
+    // Soften 429 hammering: exponential backoff up to 20s; otherwise polite 2–3s polls.
+    const delayMs = rateLimited
+      ? Math.min(20_000, 4_000 * 2 ** Math.min(attempt - 1, 2))
+      : 2_500;
+    if (rateLimited) {
+      console.warn('[publish] Gateway audio probe rate-limited; backing off', { txId, delayMs, attempt });
+    }
+    await new Promise((r) => setTimeout(r, delayMs));
   }
   return false;
 }
 
-async function isGatewayImageReady(txId: string, expectedContentType?: string): Promise<boolean> {
-  for (const url of arweaveTxDataUrls(txId)) {
-    try {
-      const res = await fetch(url, {
-        method: 'GET',
-        headers: { Range: 'bytes=0-1' },
-        cache: 'no-store',
-      });
-      if (!(res.status === 200 || res.status === 206)) continue;
-      const contentType = (res.headers.get('content-type') || '').toLowerCase();
-      if (expectedContentType && contentType && !contentType.includes(expectedContentType.toLowerCase().split(';')[0])) {
-        continue;
-      }
-      if (contentType.startsWith('image/')) {
-        return true;
-      }
-    } catch {
-      // ignore and try next gateway
-    }
+async function isGatewayImageReady(
+  txId: string,
+  expectedContentType?: string,
+  opts?: { preferTurbo?: boolean }
+): Promise<{ ready: boolean; rateLimited: boolean }> {
+  let rateLimited = false;
+  for (const url of gatewayReadyProbeUrls(txId, !!opts?.preferTurbo)) {
+    const result = await probeGatewayMediaReady(url, 'image', expectedContentType);
+    if (result === 'ready') return { ready: true, rateLimited };
+    if (result === 'rate-limited') rateLimited = true;
   }
-  return false;
+  return { ready: false, rateLimited };
 }
 
 async function waitForGatewayImageReady(
   txId: string,
   expectedContentType?: string,
-  timeoutMs = 120_000
+  timeoutMs = 120_000,
+  opts?: { preferTurbo?: boolean }
 ): Promise<boolean> {
   const start = Date.now();
+  let attempt = 0;
   while (Date.now() - start < timeoutMs) {
-    const ready = await isGatewayImageReady(txId, expectedContentType);
+    const { ready, rateLimited } = await isGatewayImageReady(txId, expectedContentType, opts);
     if (ready) return true;
-    await new Promise((r) => setTimeout(r, 3_000));
+    attempt += 1;
+    const delayMs = rateLimited
+      ? Math.min(20_000, 4_000 * 2 ** Math.min(attempt - 1, 2))
+      : 2_500;
+    await new Promise((r) => setTimeout(r, delayMs));
   }
   return false;
 }
@@ -480,7 +736,9 @@ export async function publishSampleToArweave(
     opts?.onStage?.('confirming');
     const confirmed = await waitForConfirmation(txId).catch(() => false);
     opts?.onStage?.('waiting-gateway');
-    const gatewayReady = await waitForGatewayAudioReady(txId, args.sample.type || 'audio/mpeg', 60_000).catch(() => false);
+    const gatewayReady = await waitForGatewayAudioReady(txId, args.sample.type || 'audio/mpeg', 60_000, {
+      preferTurbo: false,
+    }).catch(() => false);
     const permawebUrl = arweaveTxDataUrl(txId);
     console.info('[publish] Sample publish complete', { txId, permawebUrl });
     opts?.onStage?.('done');
@@ -506,13 +764,13 @@ export async function publishFullAsAtomicAsset(
     splits?: RoyaltySplit[];
     useTurbo?: boolean;
     turboPaymentToken?: TurboPaymentToken;
-    /** If true, only upload the signed data tx with tags (no permaweb-libs atomic asset). */
+    /** If true (default), only upload the signed data tx with tags (no permaweb-libs atomic asset). Pass false to mint. */
     skipAtomicAsset?: boolean;
     audiusTrackId?: string;
     fromAudiusStream?: boolean;
   },
   creatorAddress: string,
-  ctx: { libs: PermawebLibs | null },
+  ctx: PublishAtomicContext,
   opts?: {
     onStage?: (stage:
       | 'preparing'
@@ -521,6 +779,7 @@ export async function publishFullAsAtomicAsset(
       | 'confirming'
       | 'waiting-gateway'
       | 'creating-atomic-asset'
+      | 'confirming-atomic-asset'
       | 'registering-ao'
       | 'done'
       | 'error'
@@ -535,7 +794,10 @@ export async function publishFullAsAtomicAsset(
   }
 ): Promise<PublishResult> {
   const libs = ctx.libs;
-  if (!args.skipAtomicAsset && !libs?.createAtomicAsset) {
+  // Default: regular data-tx upload. Atomic mint only when caller sets skipAtomicAsset: false
+  // (PublishModal does that only when “Create atomic asset (experimental)” is checked).
+  const skipAtomicAsset = args.skipAtomicAsset !== false;
+  if (!skipAtomicAsset && !libs?.createAtomicAsset) {
     return { success: false, error: 'Atomic asset creation not available. Turn off “Create atomic asset (experimental)” to upload audio + UDL tags only.' };
   }
 
@@ -686,23 +948,34 @@ export async function publishFullAsAtomicAsset(
       });
       confirmed = await waitForConfirmation(txId, confirmTimeoutMs).catch(() => false);
     }
-    const gatewayReadyTimeoutMs = Math.min(
-      240_000,
-      Math.max(90_000, Math.floor((args.audio.size / (1024 * 1024)) * 45_000) + 60_000)
-    );
+    const gatewayReadyTimeoutMs = usedTurboUpload
+      ? // Turbo already accepted the item; briefly probe Turbo/CDN and don't block on arweave.net.
+        Math.min(45_000, Math.max(12_000, Math.floor((args.audio.size / (1024 * 1024)) * 8_000) + 12_000))
+      : Math.min(
+          240_000,
+          Math.max(90_000, Math.floor((args.audio.size / (1024 * 1024)) * 45_000) + 60_000)
+        );
     console.info('[publish] Waiting for gateway audio availability', {
       txId,
       gatewayReadyTimeoutMs,
+      preferTurbo: usedTurboUpload,
     });
     opts?.onStage?.('waiting-gateway');
     const gatewayReady = await waitForGatewayAudioReady(
       txId,
       args.audio.type || 'audio/mpeg',
-      gatewayReadyTimeoutMs
+      gatewayReadyTimeoutMs,
+      { preferTurbo: usedTurboUpload }
     ).catch(() => false);
+    if (!gatewayReady && usedTurboUpload) {
+      console.info(
+        '[publish] Gateway audio not confirmed yet after Turbo upload; continuing (Turbo accepted the data item)',
+        { txId }
+      );
+    }
     const permawebUrl = arweaveTxDataUrl(txId);
 
-    if (args.skipAtomicAsset) {
+    if (skipAtomicAsset) {
       try {
         opts?.onStage?.('registering-ao');
         await registerTrackOnAO({
@@ -733,19 +1006,23 @@ export async function publishFullAsAtomicAsset(
       };
     }
 
-    if (!libs?.createAtomicAsset) {
+    const mintLibs = await resolveAtomicMintLibs(ctx);
+    if (!mintLibs?.createAtomicAsset) {
       return { success: false, error: 'Atomic asset creation not available.' };
     }
 
-    const metadata: Record<string, unknown> = {
+    // Only include defined metadata — @permaweb/libs calls .toString() on every value.
+    const metadata = sanitizeAtomicAssetMetadata({
       audioTxId: txId,
       artist,
-      artwork: artworkUrlToUse || undefined,
-      artworkTxId: artworkTxId || undefined,
-      royaltiesBps: args.royaltiesBps ?? undefined,
-    };
-    if (udl) metadata.udl = udl;
-    if (splits && splits.length > 0) metadata.splits = splits;
+      ...(artworkUrlToUse ? { artwork: artworkUrlToUse } : {}),
+      ...(artworkTxId ? { artworkTxId } : {}),
+      ...(typeof args.royaltiesBps === 'number' && Number.isFinite(args.royaltiesBps)
+        ? { royaltiesBps: args.royaltiesBps }
+        : {}),
+      ...(udl ? { udl } : {}),
+      ...(splits && splits.length > 0 ? { splits } : {}),
+    });
 
     opts?.onStage?.('creating-atomic-asset');
     const assetTags: { name: string; value: string }[] = [
@@ -768,17 +1045,93 @@ export async function publishFullAsAtomicAsset(
       assetTags.push({ name: 'Royalties-Splits', value: JSON.stringify(splits) });
     }
 
-    const assetId = await libs.createAtomicAsset({
-      name: title,
-      description: args.description || `Permanent release by ${artist}`,
-      topics: ['Music', 'StreamVault', 'Atomic-Asset'],
-      creator: creatorAddress,
-      data: permawebUrl,
-      contentType: 'text/plain',
-      assetType: 'audio',
-      metadata,
-      tags: dedupeArweaveTags(assetTags),
-    });
+    if (!title || !creatorAddress) {
+      return {
+        success: false,
+        error: 'Atomic asset mint requires a non-empty title and creator address.',
+      };
+    }
+
+    let assetId: string | null = null;
+    let mintError: unknown = null;
+    try {
+      // aoconnect spawn uses global fetch (ignores connect({ fetch })). Wrap globally for Portal→peer failover.
+      assetId = await withResilientGlobalFetch(
+        () =>
+          mintLibs.createAtomicAsset({
+            name: title,
+            description: args.description || `Permanent release by ${artist}`,
+            topics: ['Music', 'StreamVault', 'Atomic-Asset'],
+            creator: creatorAddress,
+            data: permawebUrl,
+            contentType: 'text/plain',
+            assetType: 'audio',
+            supply: 1,
+            denomination: 1,
+            transferable: true,
+            metadata,
+            tags: dedupeArweaveTags(assetTags),
+          }),
+        {
+          writeNodeUrls: resolveHbWriteNodeUrls(),
+          // Fail Portal quickly (10s) then try Bazar — don't burn minutes on Portal hangs.
+          pushAttemptTimeoutMs: 10_000,
+          retries: 1,
+          hostFailoverFirst: true,
+        }
+      );
+    } catch (e) {
+      mintError = e;
+      console.warn('[publish] createAtomicAsset request failed; will poll GraphQL for delayed spawn', e);
+    }
+
+    // HyperBEAM often finishes spawn after the browser HTTP call times out — confirm via Track-AudioTx.
+    if (!assetId) {
+      opts?.onStage?.('confirming-atomic-asset');
+      const recovered = await waitForIndexedAtomicAsset({
+        audioTxId: txId,
+        creatorAddress,
+        timeoutMs: isTransientAtomicMintError(mintError) || !mintError ? 180_000 : 60_000,
+        onTick: (elapsedMs) => {
+          if (elapsedMs > 0 && elapsedMs % 20_000 < 5_000) {
+            console.info('[publish] Waiting for atomic asset index…', {
+              txId,
+              elapsedSec: Math.round(elapsedMs / 1000),
+            });
+          }
+        },
+      });
+      if (recovered) {
+        console.info('[publish] Atomic mint recovered after delay', { txId, assetId: recovered });
+        assetId = recovered;
+        mintError = null;
+      }
+    }
+
+    if (!assetId) {
+      console.error('[publish] createAtomicAsset failed / not indexed yet', mintError, {
+        metadataKeys: Object.keys(metadata),
+        writeUrl: resolveHbWriteNodeUrls()[0],
+        authority: resolveAoNode().authority,
+        scheduler: resolveAoNode().scheduler,
+      });
+      // Soft success: audio is permanent; mint may still land — don't scare users with a hard fail.
+      return {
+        success: true,
+        txId,
+        assetId: undefined,
+        mintPending: true,
+        permawebUrl,
+        arioUrl: turboTxDataUrl(txId),
+        confirmed,
+        gatewayReady,
+        artworkTxId,
+        error:
+          'Audio uploaded successfully. Atomic mint is still confirming on HyperBEAM (this can take several minutes). ' +
+          'Refresh this track or your profile before publishing the same song again.' +
+          (mintError ? ` (${describeAtomicAssetError(mintError)})` : ''),
+      };
+    }
 
     console.info('[publish] Full asset publish complete', { txId, assetId, permawebUrl });
 

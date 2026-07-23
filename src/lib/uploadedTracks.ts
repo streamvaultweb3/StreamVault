@@ -170,7 +170,7 @@ export function normalizeUploadedTrackRecord(raw: unknown): UploadedTrackRecord 
  * fresh Turbo data items play before `arweave.net/{id}` finishes propagating.
  */
 export function uploadedTrackShareUrl(track: Pick<UploadedTrackRecord, 'txId' | 'permawebUrl' | 'arioUrl'>): string {
-  return track.arioUrl || track.permawebUrl || arweaveTxDataUrl(track.txId);
+  return track.arioUrl || preferredArweaveStreamUrl(track.txId) || track.permawebUrl || arweaveTxDataUrl(track.txId);
 }
 
 function normalizeText(value: string | undefined): string {
@@ -238,7 +238,7 @@ export function uploadedTrackLicenseBadges(track: UploadedTrackRecord): string[]
   return badges;
 }
 
-/** Short badges for compact track cards (Permanent + Atomic asset only). */
+/** Short badges for compact track cards (Atomic Asset only — Arweave pill already signals permanence). */
 export function uploadedTrackCompactBadges(track: UploadedTrackRecord): string[] {
-  return trackSourceBadges({ assetId: track.assetId, isPermanent: true });
+  return trackSourceBadges({ assetId: track.assetId, isPermanent: false });
 }

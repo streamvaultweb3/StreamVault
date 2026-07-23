@@ -17,7 +17,9 @@
 .heroSubtitle {
   font-size: var(--text-base);
   color: var(--text-secondary);
-  max-width: 480px;
+  max-width: 620px;
+  margin: 0 auto;
+  text-align: center;
 }
 
 .heroCtas {
@@ -489,6 +491,7 @@
   flex-wrap: wrap;
   gap: 6px;
   width: 100%;
+  align-items: center;
 }
 
 .marketSection {

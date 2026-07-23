@@ -99,10 +99,7 @@ export function ArweaveArtist() {
                   showPermanentBadge={false}
                   footerContent={
                     upload ? (
-                      <>
-                        <span className={styles.meta}>Arweave</span>
-                        <UploadedTrackMeta track={upload} compact />
-                      </>
+                      <UploadedTrackMeta track={upload} compact sourceLabel="Arweave" />
                     ) : (
                       <span className={styles.meta}>Arweave</span>
                     )

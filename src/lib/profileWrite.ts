@@ -26,61 +26,6 @@ function profileLog(...args: unknown[]) {
   if (profileDebug) console.info('[profile:write]', ...args);
 }
 
-// #region agent log
-const PROFILE_DEBUG_SESSION = '935ac8';
-const nativeFetchForDebug = globalThis.fetch.bind(globalThis);
-function agentProfileLog(
-  location: string,
-  message: string,
-  data: Record<string, unknown>,
-  hypothesisId: string,
-  runId = 'pre-fix'
-) {
-  nativeFetchForDebug('http://127.0.0.1:7875/ingest/e73f4289-b39c-483d-adc2-eb8e696a88dd', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': PROFILE_DEBUG_SESSION },
-    body: JSON.stringify({
-      sessionId: PROFILE_DEBUG_SESSION,
-      runId,
-      hypothesisId,
-      location,
-      message,
-      data,
-      timestamp: Date.now(),
-    }),
-  }).catch(() => {});
-}
-
-function instrumentProfileDebugWallet(wallet: any) {
-  if (!wallet || (wallet as any).__svProfileDebugWrapped) return wallet;
-  const wrap = (name: string, fn: (...args: unknown[]) => unknown) => {
-    if (typeof fn !== 'function') return fn;
-    return async (...args: unknown[]) => {
-      agentProfileLog('profileWrite.ts:wallet', `wander:${name}:start`, { method: name }, 'H2');
-      try {
-        const result = await fn.apply(wallet, args);
-        agentProfileLog('profileWrite.ts:wallet', `wander:${name}:ok`, { method: name }, 'H2');
-        return result;
-      } catch (error) {
-        agentProfileLog(
-          'profileWrite.ts:wallet',
-          `wander:${name}:error`,
-          { method: name, error: String((error as { message?: string })?.message || error) },
-          'H2'
-        );
-        throw error;
-      }
-    };
-  };
-  for (const method of ['connect', 'sign', 'dispatch', 'signDataItem', 'encrypt']) {
-    if (typeof wallet[method] === 'function') {
-      wallet[method] = wrap(method, wallet[method]);
-    }
-  }
-  (wallet as any).__svProfileDebugWrapped = true;
-  return wallet;
-}
-// #endregion
 
 export type ProfileEditForm = {
   username: string;
@@ -181,23 +126,6 @@ export function shouldPreferLocalProfileWrite(local: any, maxAgeMs = 90_000): bo
 
 /** Wander permissions for HyperBEAM ans104 (SIGN_TRANSACTION) + httpsig (SIGNATURE) writes. */
 export async function connectArweaveSignerForProfile(signerWallet: any) {
-  // #region agent log
-  instrumentProfileDebugWallet(signerWallet);
-  agentProfileLog(
-    'profileWrite.ts:connectArweaveSignerForProfile',
-    'wallet connect start',
-    {
-      hasWallet: Boolean(signerWallet),
-      hasConnect: Boolean(signerWallet?.connect),
-      methods: signerWallet
-        ? ['connect', 'sign', 'dispatch', 'signDataItem', 'encrypt'].filter(
-            (m) => typeof signerWallet[m] === 'function'
-          )
-        : [],
-    },
-    'H2'
-  );
-  // #endregion
   if (!signerWallet?.connect) return;
   await signerWallet.connect([
     'ACCESS_ADDRESS',
@@ -206,9 +134,6 @@ export async function connectArweaveSignerForProfile(signerWallet: any) {
     'SIGNATURE',
     'DISPATCH',
   ]);
-  // #region agent log
-  agentProfileLog('profileWrite.ts:connectArweaveSignerForProfile', 'wallet connect ok', {}, 'H2');
-  // #endregion
 }
 
 export function resolveArweaveSigner(_arweaveApi: any) {
@@ -299,38 +224,11 @@ export async function confirmProfileWriteOnChain(args: {
       const fresh = await getProfileByIdSafe(args.readLibs, args.profileId, { timeoutMs: 20_000 });
       const snapshot = fresh?.id ? profileFieldMatchSnapshot(fresh, args.expected) : null;
       const matches = Boolean(snapshot?.matches);
-      // #region agent log
-      if (confirmPolls <= 3 || confirmPolls % 5 === 0) {
-        agentProfileLog(
-          'profileWrite.ts:confirmProfileWriteOnChain',
-          'confirm poll',
-          {
-            poll: confirmPolls,
-            hasFresh: Boolean(fresh?.id),
-            matches,
-            snapshot,
-            expectedUsername: args.expected.username.trim(),
-            expectedDisplayName: args.expected.displayName.trim(),
-          },
-          'H4'
-        );
-      }
-      // #endregion
       if (fresh?.id && matches) {
         profileLog('confirmProfileWriteOnChain ok', { profileId: args.profileId });
         return fresh;
       }
     } catch (error) {
-      // #region agent log
-      if (confirmPolls <= 2) {
-        agentProfileLog(
-          'profileWrite.ts:confirmProfileWriteOnChain',
-          'confirm poll read error',
-          { poll: confirmPolls, error: String((error as { message?: string })?.message || error) },
-          'H4'
-        );
-      }
-      // #endregion
     }
     await sleep(PROFILE_CHAIN_CONFIRM_POLL_MS);
   }
@@ -507,25 +405,6 @@ async function pushProfileZoneUpdateWithLibs(
     throw new Error('Writable permaweb client unavailable. Reconnect Wander and retry.');
   }
 
-  // #region agent log
-  const pushStartedAt = Date.now();
-  agentProfileLog(
-    'profileWrite.ts:pushProfileZoneUpdate',
-    'updateZone start',
-    {
-      label,
-      profileId,
-      zoneKeys: Object.keys(zone),
-      timeoutMs,
-      hasAo: Boolean(writableLibs?.ao),
-      aoMode: writableLibs?.ao?.MODE || null,
-      aoUrl: writableLibs?.node?.url || writableLibs?.ao?.URL || null,
-      aoScheduler: writableLibs?.node?.scheduler || writableLibs?.ao?.SCHEDULER || null,
-      hasSigner: Boolean(writableLibs?.signer || writableLibs?.ao?.signer),
-    },
-    'H1'
-  );
-  // #endregion
 
   try {
     await withHbWriteRetries(
@@ -537,28 +416,7 @@ async function pushProfileZoneUpdateWithLibs(
         ),
       label
     );
-    // #region agent log
-    agentProfileLog(
-      'profileWrite.ts:pushProfileZoneUpdate',
-      'updateZone ok',
-      { label, profileId, elapsedMs: Date.now() - pushStartedAt },
-      'H1'
-    );
-    // #endregion
   } catch (error) {
-    // #region agent log
-    agentProfileLog(
-      'profileWrite.ts:pushProfileZoneUpdate',
-      'updateZone error',
-      {
-        label,
-        profileId,
-        elapsedMs: Date.now() - pushStartedAt,
-        error: String((error as { message?: string })?.message || error),
-      },
-      'H1'
-    );
-    // #endregion
     throw error;
   }
 }
@@ -632,31 +490,10 @@ async function pushProfileZoneUpdate(
           ),
         { writeNodeUrls: nodeUrls }
       );
-      // #region agent log
-      agentProfileLog(
-        'profileWrite.ts:pushProfileZoneUpdate',
-        'push succeeded',
-        { profileId, nodeUrl, attempt: index + 1 },
-        'H7'
-      );
-      // #endregion
       return;
     } catch (error) {
       lastError = error;
       if (!isPushAttemptFailure(error) && index >= nodeUrls.length - 1) throw error;
-      // #region agent log
-      agentProfileLog(
-        'profileWrite.ts:pushProfileZoneUpdate',
-        'push node failed',
-        {
-          profileId,
-          nodeUrl,
-          attempt: index + 1,
-          error: String((error as { message?: string })?.message || error),
-        },
-        'H7'
-      );
-      // #endregion
     }
   }
 
@@ -718,51 +555,14 @@ export async function buildPermawebProfileArgsWithTimeout(
   writableLibs?: any,
   existingProfile?: any
 ): Promise<PermawebProfileArgs> {
-  // #region agent log
-  const mediaStartedAt = Date.now();
-  agentProfileLog(
-    'profileWrite.ts:buildPermawebProfileArgsWithTimeout',
-    'media build start',
-    {
-      hasThumbnailFile: Boolean(form.thumbnail),
-      hasBannerFile: Boolean(form.banner),
-      removeThumbnail: Boolean(form.removeThumbnail),
-      removeBanner: Boolean(form.removeBanner),
-    },
-    'H3'
-  );
-  // #endregion
   try {
     const args = await withWriteTimeout(
       buildPermawebProfileArgs(form, fileToDataURL, writableLibs, existingProfile),
       PROFILE_MEDIA_TIMEOUT_MS,
       'Profile media upload'
     );
-    // #region agent log
-    agentProfileLog(
-      'profileWrite.ts:buildPermawebProfileArgsWithTimeout',
-      'media build ok',
-      {
-        elapsedMs: Date.now() - mediaStartedAt,
-        hasThumbnail: Boolean(args.thumbnail),
-        hasBanner: Boolean(args.banner),
-      },
-      'H3'
-    );
-    // #endregion
     return args;
   } catch (error) {
-    // #region agent log
-    agentProfileLog(
-      'profileWrite.ts:buildPermawebProfileArgsWithTimeout',
-      'media build error',
-      {
-        elapsedMs: Date.now() - mediaStartedAt,
-        error: String((error as { message?: string })?.message || error),
-      },
-      'H3'
-    );
-    // #endregion
     throw error;
   }
 }
@@ -777,22 +577,6 @@ export async function getWritableProfileLibs(
   options?: { url?: string; scheduler?: string; authority?: string; mode?: 'mainnet' | 'legacy' }
 ): Promise<any> {
   const libs = await getWritableLibs(options);
-  // #region agent log
-  agentProfileLog(
-    'profileWrite.ts:getWritableProfileLibs',
-    'writable libs resolved',
-    {
-      options: options || null,
-      hasUpdateZone: Boolean(libs?.updateZone),
-      hasUpdateProfile: Boolean(libs?.updateProfile),
-      hasCreateProfile: Boolean(libs?.createProfile),
-      aoMode: libs?.ao?.MODE || options?.mode || null,
-      aoUrl: libs?.node?.url || null,
-      aoScheduler: libs?.node?.scheduler || options?.scheduler || null,
-    },
-    'H5'
-  );
-  // #endregion
   if (!libs?.updateZone && !libs?.updateProfile && !libs?.createProfile) {
     throw new Error('Writable permaweb client unavailable. Reconnect Wander and retry.');
   }
@@ -853,31 +637,11 @@ export async function createPermawebProfile(args: {
         () => libs.createProfile(args.profileArgs, args.onStatus),
         { writeNodeUrls: nodeUrls, pushAttemptTimeoutMs: PROFILE_PUSH_ATTEMPT_TIMEOUT_MS }
       );
-      // #region agent log
-      agentProfileLog(
-        'profileWrite.ts:createPermawebProfile',
-        'create succeeded',
-        { profileId, nodeUrl, attempt: index + 1 },
-        'H1'
-      );
-      // #endregion
       if (!profileId) throw new Error('permaweb-libs createProfile returned no profile id.');
       return profileId;
     } catch (error) {
       lastError = error;
       if (!isPushAttemptFailure(error) && index >= nodeUrls.length - 1) throw error;
-      // #region agent log
-      agentProfileLog(
-        'profileWrite.ts:createPermawebProfile',
-        'create node failed',
-        {
-          nodeUrl,
-          attempt: index + 1,
-          error: String((error as { message?: string })?.message || error),
-        },
-        'H1'
-      );
-      // #endregion
     }
   }
 
